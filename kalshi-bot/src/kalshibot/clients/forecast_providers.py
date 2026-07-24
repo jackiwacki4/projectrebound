@@ -1,0 +1,195 @@
+"""Weather data providers behind one interface, so the model can ensemble them.
+
+Forecast providers (predict the daily high):
+  - nws                 : NWS gridpoint forecast (api.weather.gov)
+  - open_meteo_best     : Open-Meteo's auto blend
+  - open_meteo_hrrr     : NOAA HRRR, high-res short-range (via Open-Meteo, decoded)
+  - open_meteo_gfs      : NOAA GFS, global (via Open-Meteo, decoded)
+  - open_meteo_ecmwf    : ECMWF IFS open data (via Open-Meteo, decoded)
+
+Observation providers (what has actually happened so far today):
+  - metar               : airport METAR observations (aviationweather.gov)
+
+Why HRRR/GFS/ECMWF come through Open-Meteo rather than raw NOMADS/ECMWF GRIB:
+Open-Meteo already ingests those exact model runs and serves them as clean,
+low-latency JSON. That gets the accuracy of all three models without GRIB
+decoding, multi-hundred-MB downloads, or system libraries -- the right trade
+for "accurate and quick" on a laptop. A raw-GRIB provider can be added behind
+this same interface later if truly needed.
+"""
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any, Optional
+
+from ..util import iso_to_ms, now_ms
+from .nws_client import NwsClient
+
+_UA = "(projectrebound-phase1, kalshibot@example.com)"
+
+
+@dataclass(frozen=True)
+class ProviderForecast:
+    provider: str
+    target_date: str          # YYYY-MM-DD
+    high_f: Optional[float]
+    issued_ts: int            # source issue time if known, else fetch time (ms)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProviderObservation:
+    obs_ts: int               # ms
+    temp_c: Optional[float]
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+def _c_to_f(c: Optional[float]) -> Optional[float]:
+    return None if c is None else c * 9.0 / 5.0 + 32.0
+
+
+def _get_json(url: str, timeout: int = 20) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# --------------------------------------------------------------------------
+# Forecast providers
+# --------------------------------------------------------------------------
+class ForecastProvider(ABC):
+    name: str
+
+    @abstractmethod
+    def forecast_highs(self, lat: float, lon: float, days: int) -> list[ProviderForecast]:
+        """Daily-high forecasts (deg F) for the next `days` local days."""
+        raise NotImplementedError
+
+
+class NwsForecastProvider(ForecastProvider):
+    name = "nws"
+
+    def __init__(self, client: Optional[NwsClient] = None) -> None:
+        self._nws = client or NwsClient(_UA)
+
+    def forecast_highs(self, lat: float, lon: float, days: int) -> list[ProviderForecast]:
+        out: list[ProviderForecast] = []
+        today = date.today()
+        for d in range(days):
+            target = (today + timedelta(days=d)).isoformat()
+            try:
+                fh = self._nws.forecast_high(lat, lon, target)
+            except Exception:
+                continue
+            if fh and fh.high_f is not None:
+                out.append(ProviderForecast(self.name, target, fh.high_f, fh.issued_ts, fh.raw))
+        return out
+
+
+class OpenMeteoForecastProvider(ForecastProvider):
+    """Open-Meteo daily max temperature. `model` selects a specific NWP model;
+    None uses Open-Meteo's auto blend."""
+
+    _BASE = "https://api.open-meteo.com/v1/forecast"
+
+    def __init__(self, name: str, model: Optional[str] = None) -> None:
+        self.name = name
+        self._model = model
+
+    def forecast_highs(self, lat: float, lon: float, days: int) -> list[ProviderForecast]:
+        params = {
+            "latitude": f"{lat}", "longitude": f"{lon}",
+            "daily": "temperature_2m_max", "temperature_unit": "fahrenheit",
+            "timezone": "auto", "forecast_days": str(max(1, min(16, days))),
+        }
+        if self._model:
+            params["models"] = self._model
+        url = self._BASE + "?" + urllib.parse.urlencode(params)
+        data = _get_json(url)
+        daily = data.get("daily", {})
+        dates = daily.get("time", []) or []
+        highs = daily.get("temperature_2m_max", []) or []
+        fetched = now_ms()
+        out: list[ProviderForecast] = []
+        for target, high in zip(dates, highs):
+            if high is None:
+                continue
+            # Open-Meteo's daily response does not expose the model run time;
+            # fetch time is the honest "known at" stamp for no-lookahead.
+            out.append(ProviderForecast(self.name, target, float(high), fetched,
+                                        {"source": "open-meteo", "model": self._model}))
+        return out
+
+
+# --------------------------------------------------------------------------
+# Observation providers
+# --------------------------------------------------------------------------
+class ObservationProvider(ABC):
+    name: str
+
+    @abstractmethod
+    def latest_observations(self, station: str, lat: float, lon: float
+                            ) -> list[ProviderObservation]:
+        raise NotImplementedError
+
+
+class MetarObservationProvider(ObservationProvider):
+    name = "metar"
+    _BASE = "https://aviationweather.gov/api/data/metar"
+
+    def latest_observations(self, station: str, lat: float, lon: float
+                            ) -> list[ProviderObservation]:
+        url = self._BASE + "?" + urllib.parse.urlencode(
+            {"ids": station, "format": "json", "hours": "3"})
+        try:
+            data = _get_json(url)
+        except Exception:
+            return []
+        rows = data if isinstance(data, list) else data.get("data", [])
+        out: list[ProviderObservation] = []
+        for r in rows or []:
+            temp_c = r.get("temp")
+            obs = r.get("obsTime") or r.get("reportTime")
+            if obs is None:
+                continue
+            # obsTime is Unix seconds; reportTime may be an ISO string.
+            obs_ms = int(obs) * 1000 if isinstance(obs, (int, float)) else iso_to_ms(str(obs))
+            out.append(ProviderObservation(obs_ms,
+                                           float(temp_c) if temp_c is not None else None, r))
+        return out
+
+
+# --------------------------------------------------------------------------
+# Build providers from config
+# --------------------------------------------------------------------------
+_OPEN_METEO_MODELS = {
+    "open_meteo_best": None,
+    "open_meteo_hrrr": "ncep_hrrr_us_conus",
+    "open_meteo_gfs": "ncep_gfs_global_0_25",
+    "open_meteo_ecmwf": "ecmwf_ifs_0_25",
+}
+
+
+def build_forecast_providers(names: list[str]) -> list[ForecastProvider]:
+    providers: list[ForecastProvider] = []
+    for name in names:
+        if name == "nws":
+            providers.append(NwsForecastProvider())
+        elif name in _OPEN_METEO_MODELS:
+            providers.append(OpenMeteoForecastProvider(name, _OPEN_METEO_MODELS[name]))
+        # Unknown names are ignored deliberately; config is the source of truth.
+    return providers
+
+
+def build_observation_providers(names: list[str]) -> list[ObservationProvider]:
+    providers: list[ObservationProvider] = []
+    for name in names:
+        if name == "metar":
+            providers.append(MetarObservationProvider())
+    return providers

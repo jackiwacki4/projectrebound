@@ -25,11 +25,27 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
+    # Additive migrations for databases created by an earlier schema version.
+    # `CREATE TABLE IF NOT EXISTS` never adds a column to an existing table, so
+    # bring older `forecasts` tables up to date explicitly.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(forecasts)").fetchall()}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE forecasts ADD COLUMN provider TEXT NOT NULL DEFAULT 'nws'")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_forecasts_provider "
+            "ON forecasts(provider, station, target_date)"
+        )
+
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()
     if row is None:
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+    else:
+        conn.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
             (str(SCHEMA_VERSION),),
         )

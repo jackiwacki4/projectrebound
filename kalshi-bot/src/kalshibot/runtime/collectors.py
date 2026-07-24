@@ -10,8 +10,8 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
+from ..clients.forecast_providers import ForecastProvider, ObservationProvider
 from ..clients.kalshi_client import KalshiClient
-from ..clients.nws_client import NwsClient
 from ..config import CityConfig
 from ..logging_setup import log
 from ..storage.dao import Dao
@@ -102,29 +102,54 @@ class MarketCollector:
 
 
 class WeatherCollector:
-    def __init__(self, dao: Dao, nws: NwsClient, logger: logging.Logger) -> None:
+    def __init__(self, dao: Dao, forecast_providers: list[ForecastProvider],
+                 observation_providers: list[ObservationProvider],
+                 logger: logging.Logger) -> None:
         self._dao = dao
-        self._nws = nws
+        self._forecast_providers = forecast_providers
+        self._observation_providers = observation_providers
         self._log = logger
 
     def poll_forecasts(self, cities: list[CityConfig]) -> int:
-        """Capture forecast highs across the NWS horizon, stamped with issue time."""
+        """Capture every provider's forecast highs across the horizon, each
+        stored as its own ensemble member stamped with its source."""
         stored = 0
-        today = date.today()
         for city in cities:
-            for d in range(FORECAST_HORIZON_DAYS):
-                target = (today + timedelta(days=d)).isoformat()
+            for provider in self._forecast_providers:
                 try:
-                    fh = self._nws.forecast_high(city.lat, city.lon, target)
+                    forecasts = provider.forecast_highs(city.lat, city.lon,
+                                                        FORECAST_HORIZON_DAYS)
                 except Exception as e:
-                    log(self._log, logging.WARNING, "forecast fetch failed",
-                        city=city.name, target=target, error=str(e))
+                    log(self._log, logging.WARNING, "forecast provider failed",
+                        provider=provider.name, city=city.name, error=str(e))
                     continue
-                if fh is None or fh.high_f is None:
+                for fc in forecasts:
+                    if fc.high_f is None:
+                        continue
+                    self._dao.insert_forecast(
+                        station=city.nws_station, city=city.name, issued_ts=fc.issued_ts,
+                        target_date=fc.target_date, forecast_high_f=fc.high_f,
+                        raw=fc.raw, provider=fc.provider,
+                    )
+                    stored += 1
+        return stored
+
+    def poll_observations(self, cities: list[CityConfig]) -> int:
+        """Capture station observations (e.g. METAR) -- what has actually
+        happened so far today, used to clamp the model near settlement."""
+        stored = 0
+        for city in cities:
+            for provider in self._observation_providers:
+                try:
+                    obs = provider.latest_observations(city.nws_station, city.lat, city.lon)
+                except Exception as e:
+                    log(self._log, logging.WARNING, "observation provider failed",
+                        provider=provider.name, city=city.name, error=str(e))
                     continue
-                self._dao.insert_forecast(
-                    station=city.nws_station, city=city.name, issued_ts=fh.issued_ts,
-                    target_date=target, forecast_high_f=fh.high_f, raw=fh.raw,
-                )
-                stored += 1
+                for o in obs:
+                    self._dao.insert_observation(
+                        station=city.nws_station, obs_ts=o.obs_ts,
+                        temp_c=o.temp_c, raw=o.raw,
+                    )
+                    stored += 1
         return stored

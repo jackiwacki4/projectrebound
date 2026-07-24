@@ -12,8 +12,8 @@ import logging
 import time
 from typing import Optional
 
+from ..clients.forecast_providers import build_forecast_providers, build_observation_providers
 from ..clients.kalshi_client import KalshiClient
-from ..clients.nws_client import NwsClient
 from ..config import CityConfig, Config, Credentials
 from ..execution.decider import decide
 from ..execution.live_engine import LiveEngine
@@ -37,9 +37,14 @@ class TradingSystem:
         self.log = logger
         self.dao = Dao(connect(config.db_path))
         self.client = KalshiClient(creds)
-        self.nws = NwsClient()
+        default_fps = ["nws", "open_meteo_best", "open_meteo_hrrr",
+                       "open_meteo_gfs", "open_meteo_ecmwf"]
+        fps = build_forecast_providers(config.weather.get("forecast_providers", default_fps))
+        ops = build_observation_providers(config.weather.get("observation_providers", ["metar"]))
+        logger.info(f"forecast providers: {[p.name for p in fps]}; "
+                    f"observation providers: {[p.name for p in ops]}")
         self.market_collector = MarketCollector(self.dao, self.client, logger)
-        self.weather_collector = WeatherCollector(self.dao, self.nws, logger)
+        self.weather_collector = WeatherCollector(self.dao, fps, ops, logger)
         self.paper = PaperEngine(self.dao)
         self.live = LiveEngine(self.dao, self.client)
         self.model = WeatherNormalModel(sigma_f=float(config.model.get("forecast_sigma_f", 3.0)))
@@ -60,9 +65,10 @@ class TradingSystem:
         book_period = int(col.get("book_poll_seconds", 60))
         settle_period = int(col.get("settlement_poll_seconds", 300))
         fc_period = int(self.cfg.weather.get("forecast_poll_seconds", 3600))
+        obs_period = int(self.cfg.weather.get("observation_poll_seconds", 900))
         tick = min(book_period, int(col.get("book_poll_seconds_near_settlement", 15)))
 
-        next_book = next_settle = next_fc = 0.0
+        next_book = next_settle = next_fc = next_obs = 0.0
         log(self.log, logging.INFO, "trading system starting",
             live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family)
 
@@ -74,6 +80,9 @@ class TradingSystem:
                 if now >= next_fc:
                     self._safe(self.weather_collector.poll_forecasts, self.cfg.cities)
                     next_fc = now + fc_period
+                if now >= next_obs:
+                    self._safe(self.weather_collector.poll_observations, self.cfg.cities)
+                    next_obs = now + obs_period
                 if now >= next_book:
                     ok = self._safe(self.market_collector.poll_books, self.series_list)
                     self._safe(self.market_collector.poll_trades, self.series_list)

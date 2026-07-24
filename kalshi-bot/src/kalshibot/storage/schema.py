@@ -9,7 +9,7 @@ Design rules:
   are immutable once written. Storage is cheap; lost history is unrecoverable.
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -63,15 +63,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_trade_id ON trades(trade_id)
 -- reconstruct "what did we know at decision time" without lookahead.
 CREATE TABLE IF NOT EXISTS forecasts (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider       TEXT NOT NULL DEFAULT 'nws', -- nws | open_meteo_hrrr | ... (ensemble member)
     station        TEXT NOT NULL,
     city           TEXT,
-    issued_ts      INTEGER NOT NULL, -- when NWS issued the forecast (ms)
+    issued_ts      INTEGER NOT NULL, -- when the source issued the forecast (ms)
     fetched_ts     INTEGER NOT NULL, -- when we fetched it (ms)
     target_date    TEXT NOT NULL,    -- YYYY-MM-DD local date the high is for
     forecast_high_f REAL,            -- predicted daily high, deg F
     raw            TEXT NOT NULL     -- JSON of the source payload
 );
 CREATE INDEX IF NOT EXISTS ix_forecasts_station_issued ON forecasts(station, issued_ts);
+CREATE INDEX IF NOT EXISTS ix_forecasts_provider ON forecasts(provider, station, target_date);
 
 -- Append-only station observations (used for model calibration / analysis).
 CREATE TABLE IF NOT EXISTS observations (
@@ -83,6 +85,7 @@ CREATE TABLE IF NOT EXISTS observations (
     raw           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_obs_station_ts ON observations(station, obs_ts);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_obs_station_obsts ON observations(station, obs_ts);
 
 -- Append-only decision log: the probability, the inputs that produced it, and
 -- the book state at decision time. Cannot be reconstructed after the fact.

@@ -17,7 +17,20 @@ logging:
 # station its market settles against, and the lat/lon used for forecasts.
 # Verify station IDs against each market's settlement source before trusting.
 weather:
-  forecast_poll_seconds: 3600         # NWS forecasts update ~hourly
+  forecast_poll_seconds: 3600         # forecast models update ~hourly
+  observation_poll_seconds: 900       # METAR observations refresh ~every 15-60 min
+  # Ensemble members. Each is stored and combined; disagreement between them
+  # becomes the model's uncertainty. HRRR/GFS/ECMWF are served (decoded) by
+  # Open-Meteo -- see clients/forecast_providers.py for why.
+  forecast_providers:
+    - nws                # NOAA NWS gridpoint forecast
+    - open_meteo_best    # Open-Meteo auto blend
+    - open_meteo_hrrr    # NOAA HRRR (high-res short-range)
+    - open_meteo_gfs     # NOAA GFS (global)
+    - open_meteo_ecmwf   # ECMWF IFS open data
+  # What has actually happened so far today; clamps the model near settlement.
+  observation_providers:
+    - metar              # airport METAR observations
   cities:
     - name: Chicago
       kalshi_series: KXHIGHCHI

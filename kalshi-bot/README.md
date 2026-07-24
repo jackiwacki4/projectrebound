@@ -32,14 +32,43 @@ arbitrage bot in this repo; the two share nothing.
 
 1. Snapshots the full order book (not just last trade) for the configured
    markets, plus observed trades, and stores them append-only in SQLite.
-2. Collects free NWS forecasts, stamped with the time NWS *issued* them.
-3. Runs the weather model as-of "right now" — and the data layer physically
-   cannot hand the model any record newer than that instant, so lookahead bias
-   is structurally impossible, not just discouraged.
+2. Collects forecasts from **multiple independent weather models**, plus live
+   airport observations (see below), each stamped with when it was known.
+3. Runs the ensemble weather model as-of "right now" — and the data layer
+   physically cannot hand the model any record newer than that instant, so
+   lookahead bias is structurally impossible, not just discouraged.
 4. Compares the model's probability to the order-book price, nets out the exact
    Kalshi fee, and if there's enough edge, records a paper fill and (only if
    live is enabled and all gates pass) places one real 1-contract order.
 5. Records settlement outcomes and, on demand, prints a calibration report.
+
+## Data sources (the ensemble)
+
+The model doesn't trust one forecast — it combines several, and treats their
+*disagreement* as its own uncertainty (when the models diverge, it bets less
+confidently). Providers, all free and quick, behind one interface in
+`clients/forecast_providers.py`:
+
+| Provider | Source | Role |
+|---|---|---|
+| `nws` | NOAA NWS gridpoint forecast (api.weather.gov) | forecast member |
+| `open_meteo_best` | Open-Meteo auto blend | forecast member |
+| `open_meteo_hrrr` | NOAA **HRRR** (high-res short-range) | forecast member |
+| `open_meteo_gfs` | NOAA **GFS** (global) | forecast member |
+| `open_meteo_ecmwf` | **ECMWF IFS** open data | forecast member |
+| `metar` | airport **METAR** observations (aviationweather.gov) | observation clamp |
+
+The METAR feed is what has *actually happened* so far today — the model uses it
+to clamp its answer, since the day's high can only be at or above what's already
+been observed. Enable/disable providers in `config.yaml` under `weather`.
+
+**A note on HRRR / GFS / ECMWF:** these come through Open-Meteo, which ingests
+those exact model runs and serves them as clean JSON. That's the "accurate and
+quick" path — it gets all three models without downloading multi-hundred-MB
+GRIB files or installing GRIB decoders. If you ever want to pull the *raw* GRIB
+straight from NOAA NOMADS and ECMWF Open Data (fresher by minutes, but much
+heavier), that can be added as another provider behind the same interface —
+ask and it's a bounded add.
 
 First market family: **daily high-temperature markets**. They resolve every
 day (fast sample growth), settle on a public mechanical source, and their

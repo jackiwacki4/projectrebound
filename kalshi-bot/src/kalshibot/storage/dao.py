@@ -30,6 +30,7 @@ class ForecastRow:
     target_date: str
     forecast_high_f: Optional[float]
     raw: dict[str, Any]
+    provider: str = "nws"
 
 
 @dataclass(frozen=True)
@@ -59,12 +60,21 @@ class AsOfView:
     def as_of_ms(self) -> int:
         return self._as_of
 
+    def _row_to_forecast(self, row) -> ForecastRow:
+        return ForecastRow(
+            station=row["station"], issued_ts=row["issued_ts"],
+            fetched_ts=row["fetched_ts"], target_date=row["target_date"],
+            forecast_high_f=row["forecast_high_f"], raw=json.loads(row["raw"]),
+            provider=row["provider"] if "provider" in row.keys() else "nws",
+        )
+
     def latest_forecast(self, station: str, target_date: str) -> Optional[ForecastRow]:
-        # We could only "know" a forecast once we had fetched it, so the
-        # binding no-lookahead constraint is fetched_ts <= as_of.
+        # Most recent forecast across ALL providers. We could only "know" a
+        # forecast once we had fetched it, so the binding no-lookahead
+        # constraint is fetched_ts <= as_of.
         row = self._conn.execute(
             """
-            SELECT station, issued_ts, fetched_ts, target_date, forecast_high_f, raw
+            SELECT provider, station, issued_ts, fetched_ts, target_date, forecast_high_f, raw
             FROM forecasts
             WHERE station = ? AND target_date = ? AND fetched_ts <= ?
             ORDER BY issued_ts DESC, fetched_ts DESC
@@ -72,16 +82,44 @@ class AsOfView:
             """,
             (station, target_date, self._as_of),
         ).fetchone()
-        if row is None:
-            return None
-        return ForecastRow(
-            station=row["station"],
-            issued_ts=row["issued_ts"],
-            fetched_ts=row["fetched_ts"],
-            target_date=row["target_date"],
-            forecast_high_f=row["forecast_high_f"],
-            raw=json.loads(row["raw"]),
-        )
+        return self._row_to_forecast(row) if row else None
+
+    def latest_forecasts_by_provider(self, station: str,
+                                     target_date: str) -> dict[str, ForecastRow]:
+        """Each provider's most recent forecast for the target, as-of now.
+
+        This is what the ensemble model consumes: one member per source, all
+        filtered by fetched_ts <= as_of so no future data can leak in.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT provider, station, issued_ts, fetched_ts, target_date, forecast_high_f, raw
+            FROM forecasts
+            WHERE station = ? AND target_date = ? AND fetched_ts <= ?
+            ORDER BY issued_ts DESC, fetched_ts DESC
+            """,
+            (station, target_date, self._as_of),
+        ).fetchall()
+        out: dict[str, ForecastRow] = {}
+        for row in rows:
+            fc = self._row_to_forecast(row)
+            out.setdefault(fc.provider, fc)  # first seen = most recent per provider
+        return out
+
+    def observed_max_c_today(self, station: str, day_start_ms: int,
+                             day_end_ms: int) -> Optional[float]:
+        """Highest observed temperature (deg C) so far for the target local day,
+        counting only observations known as-of now. Used to clamp the model:
+        a daily high can only be at or above what has already been observed."""
+        end = min(day_end_ms, self._as_of)
+        row = self._conn.execute(
+            """
+            SELECT MAX(temp_c) AS m FROM observations
+            WHERE station = ? AND obs_ts BETWEEN ? AND ? AND captured_ts <= ?
+            """,
+            (station, day_start_ms, end, self._as_of),
+        ).fetchone()
+        return row["m"] if row and row["m"] is not None else None
 
     def latest_book(self, ticker: str) -> Optional[BookRow]:
         row = self._conn.execute(
@@ -192,18 +230,19 @@ class Dao:
 
     def insert_forecast(self, station: str, city: Optional[str], issued_ts: int,
                         target_date: str, forecast_high_f: Optional[float],
-                        raw: dict) -> None:
+                        raw: dict, provider: str = "nws") -> None:
         self.conn.execute(
-            "INSERT INTO forecasts(station, city, issued_ts, fetched_ts, target_date, "
-            "forecast_high_f, raw) VALUES(?,?,?,?,?,?,?)",
-            (station, city, issued_ts, now_ms(), target_date, forecast_high_f,
-             json.dumps(raw)),
+            "INSERT INTO forecasts(provider, station, city, issued_ts, fetched_ts, "
+            "target_date, forecast_high_f, raw) VALUES(?,?,?,?,?,?,?,?)",
+            (provider, station, city, issued_ts, now_ms(), target_date,
+             forecast_high_f, json.dumps(raw)),
         )
 
     def insert_observation(self, station: str, obs_ts: int, temp_c: Optional[float],
                            raw: dict) -> None:
+        # OR IGNORE: the same METAR is re-seen on every poll; dedup on (station, obs_ts).
         self.conn.execute(
-            "INSERT INTO observations(station, obs_ts, captured_ts, temp_c, raw) "
+            "INSERT OR IGNORE INTO observations(station, obs_ts, captured_ts, temp_c, raw) "
             "VALUES(?,?,?,?,?)",
             (station, obs_ts, now_ms(), temp_c, json.dumps(raw)),
         )
