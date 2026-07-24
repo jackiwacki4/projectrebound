@@ -36,6 +36,10 @@ export class RiskManager {
     private readonly portfolio: PaperPortfolio
   ) {}
 
+  isTripped(): boolean {
+    return this.tripped;
+  }
+
   admit(intents: OrderIntent[], markets: Map<string, Market>): OrderIntent[] {
     this.rolloverDayIfNeeded(markets);
     if (this.tripped) return [];

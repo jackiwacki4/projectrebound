@@ -39,4 +39,21 @@ export class PortfolioStore {
   appendTrade(fill: Fill): void {
     appendFileSync(this.tradesLogPath, `${JSON.stringify(fill)}\n`);
   }
+
+  /** Most-recent-first trade ledger, for the dashboard. `beforeTs` pages backward in time. */
+  readTrades(limit: number, beforeTs?: number): Fill[] {
+    if (!existsSync(this.tradesLogPath)) return [];
+    const lines = readFileSync(this.tradesLogPath, "utf8").split("\n").filter(Boolean);
+    const fills: Fill[] = [];
+    for (const line of lines) {
+      try {
+        fills.push(JSON.parse(line) as Fill);
+      } catch {
+        // skip a malformed/partial line rather than fail the whole read
+      }
+    }
+    fills.reverse();
+    const filtered = beforeTs === undefined ? fills : fills.filter((f) => f.ts < beforeTs);
+    return filtered.slice(0, limit);
+  }
 }

@@ -9,6 +9,7 @@ import { ScannerEngine } from "./engine/scanner.js";
 import { sameMarketArb } from "./strategies/sameMarketArb.js";
 import { multiOutcomeArb } from "./strategies/multiOutcomeArb.js";
 import { createNewsReactionStrategy } from "./strategies/newsReaction.js";
+import { DashboardServer } from "./web/server.js";
 
 async function main(): Promise<void> {
   const logger = createLogger(config.logLevel);
@@ -25,16 +26,25 @@ async function main(): Promise<void> {
   const store = new PortfolioStore("./data/portfolio.json", "./data/trades.jsonl");
   const portfolio = new PaperPortfolio(config.paper.startingCashCents, store, logger);
   const riskManager = new RiskManager(config, logger, portfolio);
-  const executor = new Executor(config, logger, portfolio, restClient);
+  const executor = new Executor(config, logger, portfolio, restClient, store);
 
   const strategies = [sameMarketArb, multiOutcomeArb, createNewsReactionStrategy(logger)];
 
   const scanner = new ScannerEngine(config, logger, restClient, riskManager, executor, strategies);
   await scanner.start();
 
+  let dashboard: DashboardServer | undefined;
+  if (config.dashboard.enabled) {
+    dashboard = new DashboardServer(config, logger, portfolio, store, riskManager, scanner, restClient);
+    await dashboard.start();
+  } else {
+    logger.info("Dashboard disabled: set DASHBOARD_USERNAME and DASHBOARD_PASSWORD to enable it.");
+  }
+
   const shutdown = () => {
     logger.info("Shutting down...");
     scanner.stop();
+    dashboard?.stop();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

@@ -63,6 +63,68 @@ npm test        # vitest
 npm run build   # compile to dist/
 ```
 
+## Dashboard
+
+A read-only monitoring page: current cash, open positions, realized/unrealized
+P&L, and a trade ledger (money in/out, one row per fill). It works against
+whichever mode you're running -- the simulated paper portfolio in `paper`
+mode, real Kalshi balance/positions in `live` mode.
+
+Enable it by setting both in `.env`:
+
+```
+DASHBOARD_USERNAME=youruser
+DASHBOARD_PASSWORD=something-long-and-random
+```
+
+It starts on `http://127.0.0.1:4173` (change with `DASHBOARD_PORT`). **It
+always binds to localhost only** (`DASHBOARD_HOST=127.0.0.1`) -- that's
+deliberate, not a default you're meant to loosen. The dashboard is not
+reachable from your home network or the internet by changing that value;
+it's reachable by routing to it through something you control, below.
+
+### Checking it from your phone
+
+Don't port-forward this to the open internet -- that exposes your whole home
+network's router to internet scanning/attack traffic for very little benefit
+over the options below, which get you the same "check it from anywhere"
+result without opening any inbound port.
+
+**Fastest way to try it (a few minutes, URL changes each time you restart it):**
+
+1. Install `cloudflared`: `brew install cloudflared` (macOS), or grab the
+   installer for your OS from
+   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+2. With the bot running, in another terminal:
+   ```sh
+   cloudflared tunnel --url http://localhost:4173
+   ```
+3. It prints a random `https://<random-name>.trycloudflare.com` URL. Open
+   that on your phone -- your browser will prompt for the
+   `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` you set above. Capped at 200
+   concurrent requests, which is irrelevant for a single-viewer dashboard.
+4. The URL changes every time you restart `cloudflared`, so it's for testing,
+   not a permanent bookmark.
+
+**A private, permanent alternative that skips public URLs entirely
+(recommended if you don't need to share the link with anyone else):**
+[Tailscale](https://tailscale.com) -- install it on the laptop and on your
+phone (both free for personal use), and the dashboard becomes reachable at
+`http://<laptop-name>:4173` from anywhere your phone has internet, over an
+encrypted private network that never touches the public web. No domain, no
+certificates, no port-forwarding, ever.
+
+**A permanent public URL, if you want one:** Cloudflare's free tier supports
+named tunnels with a stable hostname, run as a background service so they
+survive laptop reboots. That needs a domain added to your Cloudflare account
+(any registrar, a few dollars a year, or one you already own) and a few more
+setup steps than the quick tunnel above -- see
+https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+for the current dashboard-driven setup flow. Add
+[Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+in front of it for a second login layer (email one-time code) beyond the
+dashboard's own password, if it'll ever be reachable by a stable link.
+
 ## Before you ever set `TRADING_MODE=live`
 
 The order-placement request in `src/kalshi/restClient.ts::createOrder` was
@@ -99,7 +161,11 @@ src/
   risk/riskManager.ts      position/event caps, order-rate limit, daily-loss kill switch
   engine/
     scanner.ts             wires market data + news into strategies
-    executor.ts            dispatches to paper portfolio or live order placement
+    executor.ts            dispatches to paper portfolio or live order placement, logs every fill to the ledger
+  web/
+    server.ts              dashboard HTTP server, Basic Auth, localhost-only bind
+    auth.ts                 timing-safe Basic Auth check
+    dashboardHtml.ts         the dashboard page (plain HTML/CSS/JS, no build step)
   cli.ts                   entrypoint
 ```
 

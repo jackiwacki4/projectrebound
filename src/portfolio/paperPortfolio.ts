@@ -52,7 +52,7 @@ export class PaperPortfolio {
   }
 
   /** Mark-to-market unrealized P&L, valuing open positions at the current best bid. */
-  unrealizedPnlCents(markets: Map<string, Market>): number {
+  unrealizedPnlCents(markets: ReadonlyMap<string, Market>): number {
     let total = 0;
     for (const [ticker, position] of Object.entries(this.state.positions)) {
       const market = markets.get(ticker);

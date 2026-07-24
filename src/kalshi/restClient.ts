@@ -130,6 +130,46 @@ export class KalshiRestClient {
   }
 
   /**
+   * Real account balance, in cents. UNVERIFIED SCHEMA (see createOrder's note
+   * below) -- read-only, so the worst case is a wrong dashboard number, not a
+   * bad trade. Confirm against https://docs.kalshi.com/api-reference/portfolio/get-balance
+   * before trusting it for anything beyond a rough dashboard readout.
+   */
+  async getBalance(): Promise<{ balanceCents: number; portfolioValueCents: number }> {
+    const raw = await this.request<{ balance: number; portfolio_value: number }>(
+      "GET",
+      "/portfolio/balance"
+    );
+    return { balanceCents: raw.balance, portfolioValueCents: raw.portfolio_value };
+  }
+
+  /**
+   * Real open positions. Same unverified-schema caveat as getBalance().
+   * `positionCount` per Kalshi's docs is signed (negative = net NO), but the
+   * "_fp" (fixed-point) suffix on the raw field is ambiguous about scaling --
+   * confirm against https://docs.kalshi.com/api-reference/portfolio/get-positions
+   * before trusting the count, not just the sign.
+   */
+  async getPositions(): Promise<
+    Array<{ ticker: string; positionCount: number; marketExposureCents: number; realizedPnlCents: number }>
+  > {
+    const raw = await this.request<{
+      market_positions: Array<{
+        ticker: string;
+        position_fp: number;
+        market_exposure_dollars: string;
+        realized_pnl_dollars: string;
+      }>;
+    }>("GET", "/portfolio/positions");
+    return raw.market_positions.map((p) => ({
+      ticker: p.ticker,
+      positionCount: p.position_fp,
+      marketExposureCents: Math.round(Number(p.market_exposure_dollars) * 100),
+      realizedPnlCents: Math.round(Number(p.realized_pnl_dollars) * 100),
+    }));
+  }
+
+  /**
    * Places a real order. UNVERIFIED SCHEMA: written from Kalshi API docs that
    * conflicted between sources at the time this was generated (JS-rendered
    * docs site, possible v1/v2 field drift). Do NOT rely on this compiling

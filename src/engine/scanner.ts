@@ -16,6 +16,7 @@ export class ScannerEngine {
   private pollTimer?: NodeJS.Timeout;
   private readonly ws: KalshiWebSocketClient;
   private readonly newsFeed: NewsFeedPoller;
+  private readonly startedAt = Date.now();
 
   constructor(
     private readonly config: Config,
@@ -51,6 +52,18 @@ export class ScannerEngine {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.ws.close();
     this.newsFeed.stop();
+  }
+
+  getMarkets(): ReadonlyMap<string, Market> {
+    return this.markets;
+  }
+
+  getEvents(): ReadonlyMap<string, EventInfo> {
+    return this.events;
+  }
+
+  getStartedAt(): number {
+    return this.startedAt;
   }
 
   private buildContext(): StrategyContext {

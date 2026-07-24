@@ -82,6 +82,16 @@ export const config = {
       .map((s) => s.trim())
       .filter(Boolean),
   },
+  dashboard: {
+    // Enabled only when both credentials are set -- no default password,
+    // ever. Always binds to localhost; reach it remotely via a tunnel
+    // (Cloudflare Tunnel / Tailscale), never by exposing this port directly.
+    enabled: Boolean(process.env.DASHBOARD_USERNAME && process.env.DASHBOARD_PASSWORD),
+    host: process.env.DASHBOARD_HOST ?? "127.0.0.1",
+    port: int(process.env.DASHBOARD_PORT, 4173),
+    username: process.env.DASHBOARD_USERNAME ?? "",
+    password: process.env.DASHBOARD_PASSWORD ?? "",
+  },
   logLevel: process.env.LOG_LEVEL ?? "info",
 };
 
