@@ -1,0 +1,63 @@
+# Phase 1 configuration. Copy to config/config.yaml (gitignored by default
+# if you keep secrets here -- but this file holds no secrets; credentials
+# live in .env). Values here are limits and tuning, never keys.
+
+market_family: weather        # only "weather" is implemented in Phase 1
+
+storage:
+  db_path: ./data/kalshibot.db
+
+logging:
+  dir: ./logs
+  level: INFO                 # DEBUG | INFO | WARNING | ERROR
+  max_bytes: 10485760         # 10 MB per file
+  backup_count: 20            # ~200 MB ceiling, then oldest rotated out
+
+# Which Kalshi daily-high-temperature cities to track. Each maps to the NWS
+# station its market settles against, and the lat/lon used for forecasts.
+# Verify station IDs against each market's settlement source before trusting.
+weather:
+  forecast_poll_seconds: 3600         # NWS forecasts update ~hourly
+  cities:
+    - name: Chicago
+      kalshi_series: KXHIGHCHI
+      nws_station: KMDW               # Midway -- confirm against market rules
+      lat: 41.786
+      lon: -87.752
+    - name: New York
+      kalshi_series: KXHIGHNY
+      nws_station: KNYC
+      lat: 40.779
+      lon: -73.969
+
+collection:
+  book_poll_seconds: 60               # full-depth order-book snapshot cadence
+  book_poll_seconds_near_settlement: 15
+  near_settlement_minutes: 120        # "near settlement" window before close
+  settlement_poll_seconds: 300        # how often to check for resolved markets
+
+# Risk gates. These BLOCK live orders; paper records are always written.
+# The 1-contract position ceiling is NOT here on purpose -- it is a hard-coded
+# constant in execution/live_engine.py and cannot be raised from config.
+risk:
+  min_edge_after_fees: 0.05           # 5 percentage points, intentionally strict
+  price_band_reject_low: 0.40         # reject trades priced 40c..60c
+  price_band_reject_high: 0.60
+  max_open_markets: 3
+  max_total_exposure_pct: 0.02        # cap open exposure at 2% of cash balance
+  max_book_age_seconds: 120           # staleness gate for order book
+  max_forecast_age_seconds: 21600     # 6h staleness gate for forecast inputs
+  daily_loss_limit_cents: 500         # circuit breaker; manual reset required
+  kill_switch_file: ./HALT            # if this file exists, no live orders
+
+model:
+  name: weather_normal                # the one Phase 1 model
+  # Std-dev (in degrees F) of the settlement-high distribution around the
+  # forecast high. Wider = more uncertain = fewer high-edge signals.
+  forecast_sigma_f: 3.0
+
+# Micro-live execution. OFF by default. Turning this on still only ever
+# places 1-contract orders, and only when every risk gate passes.
+live_trading:
+  enabled: false                      # operator must set true by hand
+  resting_order_timeout_seconds: 300  # cancel unfilled maker orders after this

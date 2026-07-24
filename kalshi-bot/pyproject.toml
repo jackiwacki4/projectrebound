@@ -1,0 +1,9 @@
+[project]
+name = "kalshibot"
+version = "0.1.0"
+description = "projectrebound Phase 1 -- Kalshi event-contract validation harness"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
