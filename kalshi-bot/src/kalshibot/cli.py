@@ -47,7 +47,7 @@ def cmd_run(args) -> int:
 
 def cmd_report(args) -> int:
     cfg = load_config(args.config)
-    report = generate_report(_dao(cfg))
+    report = generate_report(_dao(cfg), stake_dollars=args.stake)
     print(report.text)
     return 0
 
@@ -98,6 +98,9 @@ def main(argv=None) -> int:
         ("reset-breaker", cmd_reset_breaker), ("init", cmd_init),
     ]:
         p = sub.add_parser(name, parents=[common])
+        if name == "report":
+            p.add_argument("--stake", type=float, default=10.0,
+                           help="dollars deployed per trade for the scaled P&L column (default 10)")
         p.set_defaults(func=fn)
 
     args = parser.parse_args(argv)

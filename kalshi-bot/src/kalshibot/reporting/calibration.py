@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
+from ..execution.fees import taker_fee_cents
 from ..storage.dao import Dao
 
 MIN_SAMPLE = 100  # below this, refuse to present numbers as conclusive
@@ -27,23 +29,51 @@ def _pnl_cents(side: str, price_cents: int, fee_cents: int, count: int, result: 
     return gross * count - fee_cents
 
 
+def _contracts_for_stake(price_cents: int, stake_cents: int) -> int:
+    """How many contracts a given dollar stake buys at this price (>=1)."""
+    if price_cents <= 0:
+        return 0
+    return max(1, stake_cents // price_cents)
+
+
+def _scaled_pnl_cents(side: str, price_cents: int, result: str, stake_cents: int) -> tuple[int, int]:
+    """(contracts, net P&L in cents) if `stake_cents` were deployed at entry.
+    Fee recomputed (taker) for the scaled contract count. Hypothetical -- assumes
+    the whole size fills at the displayed price, which thin books won't honor."""
+    n = _contracts_for_stake(price_cents, stake_cents)
+    if n == 0:
+        return 0, 0
+    gross = (100 - price_cents) if _won(side, result) else (-price_cents)
+    fee = taker_fee_cents(price_cents, n)
+    return n, gross * n - fee
+
+
+def _fmt_usd(cents: int) -> str:
+    return f"{'-' if cents < 0 else ''}${abs(cents)/100:,.2f}"
+
+
+def _hours(ms: int) -> float:
+    return ms / 3_600_000.0
+
+
 @dataclass
 class Report:
     text: str
     resolved_count: int
 
 
-def generate_report(dao: Dao) -> Report:
+def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25) -> Report:
     conn = dao.conn
     lines: list[str] = []
+    stake_cents = int(round(stake_dollars * 100))
 
     resolved = conn.execute(
         "SELECT COUNT(*) AS c FROM decisions d JOIN settlements s ON s.ticker=d.ticker"
     ).fetchone()["c"]
 
-    lines.append("=" * 64)
+    lines.append("=" * 68)
     lines.append("projectrebound Phase 1 -- validation report")
-    lines.append("=" * 64)
+    lines.append("=" * 68)
     lines.append(f"Resolved decisions (sample size): {resolved}")
     if resolved < MIN_SAMPLE:
         lines.append("")
@@ -53,11 +83,95 @@ def generate_report(dao: Dao) -> Report:
     lines.append("")
 
     _calibration_section(conn, lines)
+    _accuracy_by_time_to_settlement(conn, lines)
     _edge_section(conn, lines)
     _pnl_section(conn, lines)
+    _trade_ledger_section(conn, lines, stake_cents, stake_dollars, ledger_rows)
     _divergence_section(conn, lines)
 
     return Report(text="\n".join(lines), resolved_count=resolved)
+
+
+def _accuracy_by_time_to_settlement(conn, lines: list[str]) -> None:
+    """Does the model get sharper as settlement approaches? Buckets each
+    decision by how long before the market closed it was made, and scores each
+    bucket. If the near-settlement bucket is much sharper, that's the live
+    observation edge showing up -- and a reason to trade later in the day."""
+    rows = conn.execute(
+        """
+        SELECT d.probability AS p, d.decision_ts AS dts, m.close_ts AS close_ts, s.result AS result
+        FROM decisions d
+        JOIN settlements s ON s.ticker = d.ticker
+        JOIN markets m ON m.ticker = d.ticker
+        WHERE m.close_ts IS NOT NULL
+        """
+    ).fetchall()
+    lines.append("-- Model accuracy by time before settlement --")
+    if not rows:
+        lines.append("  (need resolved markets with a known close time)")
+        lines.append("")
+        return
+    # (label, lower_hours_inclusive, upper_hours_exclusive)
+    buckets = [(">24h before", 24, 1e9), ("6-24h before", 6, 24),
+               ("2-6h before", 2, 6), ("<2h before", 0, 2)]
+    lines.append("  window          n    Brier   (lower = sharper)")
+    for label, lo, hi in buckets:
+        items = [r for r in rows
+                 if lo <= _hours(r["close_ts"] - r["dts"]) < hi]
+        if not items:
+            continue
+        brier = sum((float(r["p"]) - (1 if r["result"] == "yes" else 0)) ** 2 for r in items) / len(items)
+        lines.append(f"  {label:<14} {len(items):>3}   {brier:.4f}")
+    lines.append("")
+
+
+def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
+                          stake_dollars: float, ledger_rows: int) -> None:
+    """Every paper trade: what it bought, what it settled at, and the P&L --
+    both at 1 contract and scaled to a chosen dollar stake per trade."""
+    all_rows = conn.execute(
+        """
+        SELECT f.filled_ts, f.ticker, f.side, f.price_cents, f.fee_cents, s.result
+        FROM paper_fills f JOIN settlements s ON s.ticker = f.ticker
+        ORDER BY f.filled_ts DESC
+        """
+    ).fetchall()
+
+    lines.append(f"-- Trade ledger (paper) -- entry, settlement, P&L @ ${stake_dollars:.0f}/trade --")
+    if not all_rows:
+        lines.append("  (no settled paper trades yet)")
+        lines.append("")
+        return
+
+    total_1c = 0
+    total_stake = 0
+    wins = 0
+    for r in all_rows:
+        total_1c += _pnl_cents(r["side"], r["price_cents"], r["fee_cents"], 1, r["result"])
+        _, sp = _scaled_pnl_cents(r["side"], r["price_cents"], r["result"], stake_cents)
+        total_stake += sp
+        if _won(r["side"], r["result"]):
+            wins += 1
+
+    n = len(all_rows)
+    lines.append(f"  date        ticker                 side  buy   settled   P&L(1)   P&L(${stake_dollars:.0f})")
+    for r in all_rows[:ledger_rows]:
+        won = _won(r["side"], r["result"])
+        settled = "WON $1.00" if won else "LOST $.00"
+        pnl1 = _pnl_cents(r["side"], r["price_cents"], r["fee_cents"], 1, r["result"])
+        contracts, pnls = _scaled_pnl_cents(r["side"], r["price_cents"], r["result"], stake_cents)
+        when = datetime.fromtimestamp(r["filled_ts"] / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
+        tick = (r["ticker"] or "")[:20]
+        lines.append(f"  {when}  {tick:<20}  {r['side']:<4}  {r['price_cents']:>2}c  "
+                     f"{settled:<9}  {_fmt_usd(pnl1):>6}  {_fmt_usd(pnls):>8}")
+    if n > ledger_rows:
+        lines.append(f"  ... and {n - ledger_rows} older trades (full history in the database)")
+    lines.append("")
+    lines.append(f"  TOTALS over {n} settled trades:  win rate {100*wins/n:.1f}%")
+    lines.append(f"    at 1 contract/trade : {_fmt_usd(total_1c)}")
+    lines.append(f"    at ${stake_dollars:.0f}/trade      : {_fmt_usd(total_stake)}   "
+                 f"(hypothetical -- assumes full fills at the shown price)")
+    lines.append("")
 
 
 def _calibration_section(conn, lines: list[str]) -> None:

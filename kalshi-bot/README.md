@@ -40,7 +40,14 @@ arbitrage bot in this repo; the two share nothing.
 4. Compares the model's probability to the order-book price, nets out the exact
    Kalshi fee, and if there's enough edge, records a paper fill and (only if
    live is enabled and all gates pass) places one real 1-contract order.
-5. Records settlement outcomes and, on demand, prints a calibration report.
+5. Records settlement outcomes and, on demand, prints a report: calibration,
+   **accuracy bucketed by how long before settlement each call was made** (does
+   it get sharper late in the day?), and a **per-trade ledger** — every entry,
+   whether it settled as a win ($1.00) or loss ($0.00), and the P&L both at
+   1 contract and scaled to a dollar stake you choose (`--stake`, default $10).
+   The scaled figure is a hypothetical: it assumes the whole size filled at the
+   displayed price, which thin books won't honor — the 1-contract live column is
+   the reality check.
 
 ## Data sources (the ensemble)
 
@@ -103,7 +110,8 @@ PYTHONPATH=src python3 -m kalshibot.cli run
 Other commands:
 
 ```sh
-PYTHONPATH=src python3 -m kalshibot.cli report          # the validation report
+PYTHONPATH=src python3 -m kalshibot.cli report            # the validation report
+PYTHONPATH=src python3 -m kalshibot.cli report --stake 25 # scale the trade-ledger P&L to $25/trade
 PYTHONPATH=src python3 -m kalshibot.cli health          # JSON health snapshot
 PYTHONPATH=src python3 -m kalshibot.cli reset-breaker   # clear a tripped loss breaker (manual)
 ```
