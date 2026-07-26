@@ -139,9 +139,16 @@ def _activity_section(conn, lines: list[str]) -> None:
     if decisions == 0:
         if books == 0:
             lines.append("  >> NOT COLLECTING. No order books stored -- check the run window for errors.")
+        elif books_usable == 0 and books >= 200:
+            # A genuinely thin market still quotes SOMETIMES. Hundreds of polls
+            # with zero quotes is a parsing/shape bug, not market conditions --
+            # this exact signature hid the orderbook_fp mismatch.
+            lines.append(f"  >> SUSPICIOUS: {books} polls, not one with a quote. A thin market")
+            lines.append("     would still quote occasionally. Likely an order-book parsing")
+            lines.append("     problem rather than market conditions -- worth investigating.")
         elif books_usable == 0:
-            lines.append("  >> Collecting, but every order book has been EMPTY (no live quotes).")
-            lines.append("     Normal for thin markets overnight; should populate during the day.")
+            lines.append("  >> Collecting, but no order book has carried a quote yet.")
+            lines.append("     Can be normal for thin markets; re-check once trading is active.")
         elif forecasts == 0:
             lines.append("  >> Collecting prices but NO forecasts -- the weather sources are failing.")
         else:

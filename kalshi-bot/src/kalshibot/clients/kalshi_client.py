@@ -139,10 +139,47 @@ class KalshiClient:
     def get_market(self, ticker: str) -> dict:
         return self._request("GET", f"/markets/{ticker}").get("market", {})
 
+    @staticmethod
+    def _parse_levels(levels: Any, dollars: bool) -> list[list[int]]:
+        """Normalise one side of the book to [[price_cents, count], ...], best-first.
+
+        `dollars=True` handles the fixed-point form the live API returns:
+        prices as dollar strings ("0.0100" = 1c) and counts as decimal strings
+        ("2276.30"). Levels arrive ascending by price; these are BIDS, so best
+        is the HIGHEST price -- we sort descending.
+        """
+        out: list[list[int]] = []
+        for entry in (levels or []):
+            try:
+                p, c = entry[0], entry[1]
+                price_cents = round(float(p) * 100) if dollars else int(p)
+                count = round(float(c))
+            except (TypeError, ValueError, IndexError):
+                continue
+            out.append([price_cents, count])
+        out.sort(key=lambda lv: lv[0], reverse=True)
+        return out
+
     def get_orderbook(self, ticker: str) -> OrderBook:
-        raw = self._request("GET", f"/markets/{ticker}/orderbook").get("orderbook", {})
-        yes = [[int(p), int(c)] for p, c in (raw.get("yes") or [])]
-        no = [[int(p), int(c)] for p, c in (raw.get("no") or [])]
+        """Fetch and normalise the order book.
+
+        VERIFIED against the live API (2026-07): the response is
+          {"orderbook_fp": {"yes_dollars": [["0.0100","3166.32"], ...],
+                            "no_dollars":  [...]}}
+        NOT the {"orderbook": {"yes": [[cents, count]]}} shape assumed earlier --
+        that mismatch silently produced empty books on every single poll. The
+        legacy shape is still accepted as a fallback in case the demo
+        environment or a future version serves it.
+        """
+        raw = self._request("GET", f"/markets/{ticker}/orderbook")
+        fp = raw.get("orderbook_fp")
+        if isinstance(fp, dict):
+            yes = self._parse_levels(fp.get("yes_dollars"), dollars=True)
+            no = self._parse_levels(fp.get("no_dollars"), dollars=True)
+        else:
+            legacy = raw.get("orderbook") or {}
+            yes = self._parse_levels(legacy.get("yes"), dollars=False)
+            no = self._parse_levels(legacy.get("no"), dollars=False)
         return OrderBook(ticker=ticker, captured_ts=now_ms(), yes_levels=yes, no_levels=no)
 
     def get_trades(self, ticker: str, limit: int = 100) -> list[dict]:
