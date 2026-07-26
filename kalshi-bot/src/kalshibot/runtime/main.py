@@ -58,6 +58,8 @@ class TradingSystem:
         self.series_by_city = {c.kalshi_series: c for c in config.cities}
         self.series_list = [c.kalshi_series for c in config.cities]
         self._live_halted = False  # set on unhandled trading-path error (fail closed)
+        self._cycle_counts: dict[str, int] = {"decisions": 0, "passed": 0}
+        self._cycle_blocks: dict[str, int] = {}
 
     # ---- scheduling ----
     def run(self) -> None:
@@ -71,6 +73,16 @@ class TradingSystem:
         next_book = next_settle = next_fc = next_obs = 0.0
         log(self.log, logging.INFO, "trading system starting",
             live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family)
+        # State the account balance once at startup rather than implying it via
+        # a per-market gate message every cycle.
+        bal = self._read_balance()
+        if bal is None:
+            log(self.log, logging.WARNING, "could not read account balance "
+                "(read-only check); live trading would be blocked until this succeeds")
+        else:
+            log(self.log, logging.INFO, f"account balance ${bal/100:,.2f}"
+                + ("  (unfunded -- fine for paper mode; fund manually in Kalshi "
+                   "before enabling live trading)" if bal == 0 else ""))
 
         while True:
             start = time.monotonic()
@@ -114,10 +126,13 @@ class TradingSystem:
     def _decision_cycle(self) -> None:
         try:
             balance = self._read_balance()
+            self._cycle_counts = {"decisions": 0, "passed": 0}
+            self._cycle_blocks: dict[str, int] = {}
             for city in self.cfg.cities:
                 markets = self.client.list_markets(series_ticker=city.kalshi_series, status="open")
                 for raw in markets:
                     self._decide_one(raw, city, balance)
+            self._log_cycle_summary(balance)
         except Exception as e:
             # Fail closed: halt live trading for the rest of the process.
             self._live_halted = True
@@ -162,8 +177,16 @@ class TradingSystem:
             edge_after_fees=intent.edge_after_fees,
             gate_passed=gate.passed, blocked_by=gate.blocked_by,
         )
-        # Paper path: always recorded.
+        # Paper path: always recorded, regardless of the gates. The gates
+        # govern real orders; the paper record is the research data.
         self.paper.record(decision_id, intent)
+
+        self._cycle_counts["decisions"] += 1
+        if gate.passed:
+            self._cycle_counts["passed"] += 1
+        else:
+            self._cycle_blocks[gate.blocked_by or "?"] = \
+                self._cycle_blocks.get(gate.blocked_by or "?", 0) + 1
 
         # Live path: only if enabled, not halted, and every gate passed.
         if self.cfg.live_trading_enabled and not self._live_halted and gate.passed:
@@ -176,8 +199,23 @@ class TradingSystem:
                 log(self.log, logging.ERROR, "live submit failed -- HALTING LIVE",
                     ticker=market.ticker, error=str(e))
         elif not gate.passed:
-            log(self.log, logging.INFO, "live order blocked by risk gate",
+            # DEBUG, not INFO: this fires for every market on every cycle, which
+            # buried real warnings under thousands of routine lines per day. The
+            # per-cycle summary below carries the same information, and every
+            # block is permanently recorded in the decisions table for the report.
+            log(self.log, logging.DEBUG, "gate blocked a would-be live order",
                 ticker=market.ticker, gate=gate.blocked_by, reason=gate.reason)
+
+    def _log_cycle_summary(self, balance: Optional[int]) -> None:
+        counts, blocks = self._cycle_counts, self._cycle_blocks
+        if counts["decisions"] == 0:
+            return
+        detail = ", ".join(f"{k} x{v}" for k, v in
+                           sorted(blocks.items(), key=lambda kv: -kv[1])) or "none"
+        mode = "live-enabled" if self.cfg.live_trading_enabled else "paper-only"
+        log(self.log, logging.INFO, "scan complete",
+            decisions=counts["decisions"], would_pass_gates=counts["passed"],
+            blocked_by=detail, mode=mode)
 
     # ---- helpers ----
     def _read_balance(self) -> Optional[int]:

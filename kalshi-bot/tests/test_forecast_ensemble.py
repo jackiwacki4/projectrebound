@@ -42,16 +42,24 @@ def test_ensemble_combines_providers_and_widens_sigma_on_disagreement(dao):
     assert 0.65 < pred.probability < 0.67
 
 
+# insert_observation stamps captured_ts at insertion time, so an as_of of
+# exactly `now` races the write -- the row may land a millisecond in the
+# "future" and be correctly hidden by the no-lookahead filter, making these
+# tests flaky. Decide slightly after seeding, as production always does.
+_DECIDE_AFTER_MS = 1000
+
+
 def test_observation_clamp_forces_certainty_when_already_reached(dao):
     now = now_ms()
     td = date.today().isoformat()
     _insert_forecast(dao, "nws", "KMDW", td, 90.0, fetched_ts=now - 1000)
-    # Already observed 89F (31.667C) today -> "above 88" is settled true.
+    # Already observed 89F (31.667C) today -> "above 88" needs 89, so settled true.
     dao.insert_observation("KMDW", obs_ts=now - 500, temp_c=(89 - 32) * 5 / 9, raw={})
 
+    at = now + _DECIDE_AFTER_MS
     model = WeatherNormalModel(sigma_f=3.0)
     pred = model.predict(_market(td, "above", 88.0),
-                         MarketContext(view=dao.as_of(now), decision_ts=now))
+                         MarketContext(view=dao.as_of(at), decision_ts=at))
     assert pred.probability == 1.0
     assert pred.inputs["observed_max_f_so_far"] == 89.0
 
@@ -62,9 +70,10 @@ def test_observation_clamp_forces_zero_for_below_market_once_exceeded(dao):
     _insert_forecast(dao, "nws", "KMDW", td, 90.0, fetched_ts=now - 1000)
     dao.insert_observation("KMDW", obs_ts=now - 500, temp_c=(89 - 32) * 5 / 9, raw={})
 
+    at = now + _DECIDE_AFTER_MS
     model = WeatherNormalModel(sigma_f=3.0)
     pred = model.predict(_market(td, "below", lower=None, upper=88.0),
-                         MarketContext(view=dao.as_of(now), decision_ts=now))
+                         MarketContext(view=dao.as_of(at), decision_ts=at))
     assert pred.probability == 0.0
 
 

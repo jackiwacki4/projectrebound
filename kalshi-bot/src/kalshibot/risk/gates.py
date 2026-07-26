@@ -92,6 +92,11 @@ class RiskGateChain:
     def _max_exposure(self, intent, ctx) -> Optional[str]:
         if ctx.account_balance_cents is None:
             return "balance unknown; cannot check exposure cap"
+        if ctx.account_balance_cents == 0:
+            # Say the actual cause. "cap 0c" is arithmetically true but reads
+            # like a misconfigured limit rather than an unfunded account.
+            return ("account balance is $0.00, so any exposure exceeds the cap -- "
+                    "fund the account manually in Kalshi before enabling live trading")
         pct = float(self.cfg.get("max_total_exposure_pct", 0.02))
         cap_cents = pct * ctx.account_balance_cents
         prospective = ctx.open_exposure_cents + intent.limit_price_cents  # 1 contract
