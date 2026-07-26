@@ -112,13 +112,25 @@ def _activity_section(conn, lines: list[str]) -> None:
     forecasts = one("SELECT COUNT(*) FROM forecasts")
     providers = one("SELECT COUNT(DISTINCT provider) FROM forecasts")
     obs = one("SELECT COUNT(*) FROM observations")
+    ratings = one("SELECT COUNT(*) FROM sports_ratings")
+    rating_sources = one("SELECT COUNT(DISTINCT provider) FROM sports_ratings")
+    game_states = one("SELECT COUNT(*) FROM sports_game_states")
+    games = one("SELECT COUNT(*) FROM sports_games")
     markets = one("SELECT COUNT(*) FROM markets")
     settled = one("SELECT COUNT(*) FROM settlements")
     last_book = one("SELECT MAX(captured_ts) FROM book_snapshots")
+    model_inputs = forecasts + ratings
 
     lines.append("-- Activity (is it working?) --")
-    lines.append(f"  data collected : {books} book snapshots ({books_usable} with live quotes), "
-                 f"{forecasts} forecasts from {providers} sources, {obs} observations")
+    lines.append(f"  data collected : {books} book snapshots ({books_usable} with live quotes)")
+    # Only the running family's input lines are shown, so a weather report is
+    # not padded with four sports zeros (and vice versa).
+    if forecasts or not ratings:
+        lines.append(f"  weather inputs : {forecasts} forecasts from {providers} sources, "
+                     f"{obs} station observations")
+    if ratings or games:
+        lines.append(f"  sports inputs  : {ratings} ratings from {rating_sources} methods, "
+                     f"{game_states} game states, {games} games linked")
     lines.append(f"  markets tracked: {markets}   settled so far: {settled}")
     lines.append(f"  decisions made : {decisions}  (passed all risk gates: {passed})")
     lines.append(f"  paper trades   : {paper}  ({pending} awaiting settlement)")
@@ -149,8 +161,12 @@ def _activity_section(conn, lines: list[str]) -> None:
         elif books_usable == 0:
             lines.append("  >> Collecting, but no order book has carried a quote yet.")
             lines.append("     Can be normal for thin markets; re-check once trading is active.")
-        elif forecasts == 0:
-            lines.append("  >> Collecting prices but NO forecasts -- the weather sources are failing.")
+        elif model_inputs == 0:
+            lines.append("  >> Collecting prices but NO model inputs (forecasts / ratings) --")
+            lines.append("     the data sources are failing. Check the log for provider warnings.")
+        elif ratings and games == 0:
+            lines.append("  >> Ratings exist but no game is linked to a market. Usually a team-code")
+            lines.append("     mismatch -- see the 'no ESPN game matched' warnings in the log.")
         else:
             lines.append("  >> Data is arriving but no decisions yet. Usually means no market has")
             lines.append("     cleared the minimum-edge bar -- which is the gates doing their job.")

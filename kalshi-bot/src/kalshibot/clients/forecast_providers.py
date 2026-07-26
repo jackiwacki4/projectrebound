@@ -19,20 +19,16 @@ this same interface later if truly needed.
 """
 from __future__ import annotations
 
-import json
-import urllib.error
 import urllib.parse
-import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Optional
 
 from ..util import iso_to_ms, now_ms
+from .http_json import USER_AGENT as _UA
+from .http_json import get_json as _get_json
 from .nws_client import NwsClient
-from .ssl_support import ssl_context
-
-_UA = "(projectrebound-phase1, kalshibot@example.com)"
 
 
 @dataclass(frozen=True)
@@ -53,24 +49,6 @@ class ProviderObservation:
 
 def _c_to_f(c: Optional[float]) -> Optional[float]:
     return None if c is None else c * 9.0 / 5.0 + 32.0
-
-
-def _get_json(url: str, timeout: int = 20) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # Include the response body: these APIs explain *why* in a JSON "reason"
-        # field, and a bare "HTTP Error 400: Bad Request" hides it.
-        body = ""
-        try:
-            body = e.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        raise urllib.error.HTTPError(
-            e.url, e.code, f"{e.reason} -- {body}" if body else str(e.reason),
-            e.headers, None) from None
 
 
 # --------------------------------------------------------------------------

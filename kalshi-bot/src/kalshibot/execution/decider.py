@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..models.base import Market, Prediction
+from ..models.base import MarketBase, Prediction
 from ..storage.dao import BookRow
 from .fees import taker_fee_cents
 from .intent import OrderIntent
@@ -24,7 +24,7 @@ def _ev_dollars(win_prob: float, price_cents: Optional[int]) -> Optional[float]:
     return win_prob * 1.0 - price_cents / 100.0 - fee
 
 
-def decide(market: Market, prediction: Prediction, book: BookRow,
+def decide(market: MarketBase, prediction: Prediction, book: BookRow,
            decision_ts: int) -> Optional[OrderIntent]:
     """Pick the better side (YES vs NO) by fee-adjusted EV, or None if neither
     side is tradable from the current book."""

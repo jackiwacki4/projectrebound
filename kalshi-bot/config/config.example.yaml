@@ -2,7 +2,10 @@
 # if you keep secrets here -- but this file holds no secrets; credentials
 # live in .env). Values here are limits and tuning, never keys.
 
-market_family: weather        # only "weather" is implemented in Phase 1
+# Which market family this process trades: "weather" or "sports". ONE per
+# process -- to run both, keep two config files pointing at two databases
+# (storage.db_path) and start the bot twice.
+market_family: weather
 
 storage:
   db_path: ./data/kalshibot.db
@@ -43,6 +46,70 @@ weather:
       lat: 40.779
       lon: -73.969
 
+# Sports game-winner markets ("Will <team> win?"). Only read when
+# market_family is "sports". Same shape as the weather section above: several
+# independent rating methods form an ensemble, and a live feed of what has
+# actually happened clamps the answer as the game runs out.
+sports:
+  schedule_poll_seconds: 1800         # re-link Kalshi markets to real games
+  rating_poll_seconds: 1800           # recompute each member's predicted margin
+  state_poll_seconds: 60              # live score -- the fast one that matters
+  results_poll_seconds: 21600         # completed games, for the Elo member
+  schedule_horizon_days: 4            # how far ahead to rate games
+  results_lookback_days: 45           # history the Elo member replays
+  # A game that has started but whose score is older than this leaves the model
+  # with no opinion. An in-progress game with a dead feed is exactly where a
+  # pre-game probability is most confidently wrong.
+  max_state_age_seconds: 900
+  # Ensemble members. Each is stored and combined; disagreement between them
+  # becomes the model's uncertainty (see clients/sports_providers.py).
+  rating_providers:
+    - elo                # Elo replayed from collected results (recent form)
+    - log5               # Bradley-Terry on season win-loss records
+    - pythagorean        # expected win rate from runs/points for and against
+    # - espn_bookmaker   # sportsbook line. OFF BY DELIBERATE DEFAULT: it is
+    #                    # another market's price, not an independent model, and
+    #                    # switching it on changes the experiment from "can a
+    #                    # model beat Kalshi" to "does Kalshi disagree with
+    #                    # DraftKings". It also costs one request per game.
+  pythagorean_exponent: 1.83          # baseball value; sane elsewhere
+  # What has actually happened so far; clamps the model as the game progresses.
+  state_providers:
+    - espn_scoreboard
+  # Leagues to track. The three physical constants are REQUIRED per league --
+  # a margin sigma borrowed from another sport silently ruins every probability.
+  #   margin_sigma          std-dev of final margin (runs/points)
+  #   home_advantage_margin expected margin from playing at home
+  #   regulation_periods    innings / quarters / periods in regulation
+  # Kalshi series tickers and team codes below were verified against live market
+  # metadata (2026-07); a league Kalshi has no open markets for is commented out
+  # because its ticker shape is UNVERIFIED -- check it before trusting it.
+  leagues:
+    - name: mlb
+      kalshi_series: KXMLBGAME
+      espn_path: baseball/mlb
+      margin_sigma: 4.4               # MLB run-margin spread, ~4.3-4.5
+      home_advantage_margin: 0.25     # ~52.5% home win rate in run terms
+      regulation_periods: 9
+      # The classic baseball Elo K is ~4, but that assumes ratings carried over
+      # from previous seasons. This bot starts everyone level and replays only
+      # results_lookback_days, and at K=4 that cold start barely separates the
+      # league (verified: a 30-day history spread Elo margins over half a run
+      # while the record-based members spread over five). Larger K buys
+      # separation at the cost of noise; if you lengthen the lookback, lower it.
+      elo_k: 10.0
+      elo_home_advantage: 25.0        # Elo points
+      elo_min_games: 10
+    # - name: nfl
+    #   kalshi_series: KXNFLGAME       # verified: KXNFLGAME-26AUG15DALSEA-SEA
+    #   espn_path: football/nfl
+    #   margin_sigma: 13.5             # NFL point-margin spread
+    #   home_advantage_margin: 1.5
+    #   regulation_periods: 4
+    #   elo_k: 30.0                    # 17 games, so each one moves a rating a lot
+    #   elo_home_advantage: 55.0
+    #   elo_min_games: 6               # NB: pre-season games carry little signal
+
 collection:
   book_poll_seconds: 60               # full-depth order-book snapshot cadence
   book_poll_seconds_near_settlement: 15
@@ -64,10 +131,14 @@ risk:
   kill_switch_file: ./HALT            # if this file exists, no live orders
 
 model:
-  name: weather_normal                # the one Phase 1 model
-  # Std-dev (in degrees F) of the settlement-high distribution around the
-  # forecast high. Wider = more uncertain = fewer high-edge signals.
+  # Weather: std-dev (in degrees F) of the settlement-high distribution around
+  # the forecast high. Wider = more uncertain = fewer high-edge signals.
   forecast_sigma_f: 3.0
+  # Sports: floor (in runs/points) under the ensemble's uncertainty. The sports
+  # members all read the same season from the same feed, so unlike the weather
+  # models they agree more than they are jointly right -- this stops a false
+  # consensus from producing a confident probability. 0 disables the floor.
+  min_sigma_floor: 1.0
 
 # Micro-live execution. OFF by default. Turning this on still only ever
 # places 1-contract orders, and only when every risk gate passes.

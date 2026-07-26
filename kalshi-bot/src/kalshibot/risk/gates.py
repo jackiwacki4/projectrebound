@@ -24,6 +24,9 @@ from .kill_switch import KillSwitch
 class GateContext:
     now_ms: int
     book_captured_ts: Optional[int]
+    # When the model's primary input was last known: the newest forecast for the
+    # weather family, the newest rating (or live score, once a game is under way)
+    # for sports. Named for the family it was written for; the gate is generic.
     forecast_fetched_ts: Optional[int]
     open_live_markets: int
     account_balance_cents: Optional[int]   # None => balance read failed
@@ -112,7 +115,7 @@ class RiskGateChain:
         if ctx.book_captured_ts is None or (ctx.now_ms - ctx.book_captured_ts) > max_book:
             return "order book snapshot too old (or missing)"
         if ctx.forecast_fetched_ts is None or (ctx.now_ms - ctx.forecast_fetched_ts) > max_fc:
-            return "forecast data too old (or missing)"
+            return "model input data too old (or missing)"
         return None
 
     def _balance_sanity(self, intent, ctx) -> Optional[str]:

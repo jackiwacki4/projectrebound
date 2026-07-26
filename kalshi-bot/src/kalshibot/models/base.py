@@ -1,9 +1,13 @@
 """Prediction model plugin interface.
 
-A model receives a Market plus a MarketContext (which wraps an AsOfView -- so it
+A model receives a market plus a MarketContext (which wraps an AsOfView -- so it
 structurally cannot see the future) and returns a Prediction: a probability, an
 uncertainty measure, and the structured inputs that produced it. The inputs are
 persisted with every decision, which is what makes later calibration possible.
+
+Market types are per-family (`Market` here for weather, `SportsMarket` in
+`models/sports.py`); both derive from `MarketBase`, which is all the execution
+and risk layers ever need to see.
 """
 from __future__ import annotations
 
@@ -15,9 +19,21 @@ from ..storage.dao import AsOfView
 
 
 @dataclass(frozen=True)
-class Market:
+class MarketBase:
+    """The only two fields every family's market type shares.
+
+    Each family defines its own subclass with the fields its model needs
+    (`Market` for weather, `SportsMarket` for sports). Everything downstream of
+    the model -- the decider, the intent, the gates -- only ever touches the
+    ticker, so it stays family-agnostic.
+    """
     ticker: str
     series: str
+
+
+@dataclass(frozen=True)
+class Market(MarketBase):
+    """A weather (daily-high temperature) market."""
     city: Optional[str]
     # Parsed settlement threshold for temperature markets, if known.
     # kind: "above"/"below"/"between"; bounds in deg F.
@@ -52,7 +68,7 @@ class PredictionModel(ABC):
     name: str = "base"
 
     @abstractmethod
-    def predict(self, market: Market, context: MarketContext) -> Optional[Prediction]:
+    def predict(self, market: MarketBase, context: MarketContext) -> Optional[Prediction]:
         """Return a calibrated probability plus its inputs, or None if the model
         lacks the data to make a call (e.g. no forecast known yet as-of now)."""
         raise NotImplementedError

@@ -3,10 +3,16 @@
 **This is not a profit-seeking bot.** It is an instrumentation and validation
 harness whose one job is to find out whether a *predictive edge exists at all*,
 with the machinery for real trading already in place but deliberately
-constrained. It collects market + weather data, runs an inspectable prediction
-model, and routes every candidate trade down two paths — a full-size **paper**
-record and a **1-contract micro-live** order — so the gap between them measures
-the real cost (slippage + adverse selection) that paper trading hides.
+constrained. It collects market data plus the inputs a model needs, runs an
+inspectable prediction model, and routes every candidate trade down two paths —
+a full-size **paper** record and a **1-contract micro-live** order — so the gap
+between them measures the real cost (slippage + adverse selection) that paper
+trading hides.
+
+Two market families are implemented, chosen by `market_family` in the config:
+**weather** (daily high-temperature markets) and **sports** (game-winner
+markets). They are the same machine pointed at a different driver — see
+[The sports family](#the-sports-family).
 
 It is a separate Python project living alongside the original TypeScript
 arbitrage bot in this repo; the two share nothing.
@@ -32,11 +38,13 @@ arbitrage bot in this repo; the two share nothing.
 
 1. Snapshots the full order book (not just last trade) for the configured
    markets, plus observed trades, and stores them append-only in SQLite.
-2. Collects forecasts from **multiple independent weather models**, plus live
-   airport observations (see below), each stamped with when it was known.
-3. Runs the ensemble weather model as-of "right now" — and the data layer
-   physically cannot hand the model any record newer than that instant, so
-   lookahead bias is structurally impossible, not just discouraged.
+2. Collects the running family's model inputs from **multiple independent
+   sources** — weather forecasts, or sports rating methods — plus a live feed of
+   what has actually happened so far (airport observations, or the game score),
+   each stamped with when it was known.
+3. Runs the ensemble model as-of "right now" — and the data layer physically
+   cannot hand the model any record newer than that instant, so lookahead bias is
+   structurally impossible, not just discouraged.
 4. Compares the model's probability to the order-book price, nets out the exact
    Kalshi fee, and if there's enough edge, records a paper fill and (only if
    live is enabled and all gates pass) places one real 1-contract order.
@@ -49,7 +57,7 @@ arbitrage bot in this repo; the two share nothing.
    displayed price, which thin books won't honor — the 1-contract live column is
    the reality check.
 
-## Data sources (the ensemble)
+## Data sources (the weather ensemble)
 
 The model doesn't trust one forecast — it combines several, and treats their
 *disagreement* as its own uncertainty (when the models diverge, it bets less
@@ -80,9 +88,83 @@ ask and it's a bounded add.
 
 First market family: **daily high-temperature markets**. They resolve every
 day (fast sample growth), settle on a public mechanical source, and their
-predictive inputs (NWS forecasts) are free. A second family (sports) can be
-added as a module later — the market-family seam is already there — but is out
-of scope for Phase 1.
+predictive inputs (NWS forecasts) are free.
+
+## The sports family
+
+Sports game-winner markets ("Will Seattle win?"), built on the *same model* as
+the weather one rather than a new idea. The weather model treats the settlement
+temperature as Normally distributed around an ensemble of forecast highs and
+integrates over the market's threshold. The sports model does exactly that with a
+different driver — the **game margin** (home score minus away score):
+
+| | weather | sports |
+|---|---|---|
+| driver | daily high (°F) | final margin (runs / points) |
+| ensemble member | one NWP model's forecast high | one rating method's expected margin |
+| base sigma | forecast error | irreducible game randomness |
+| spread | model disagreement | method disagreement |
+| observation | METAR temperature so far today | live score + inning so far |
+| threshold | "97° or above" | "margin ≥ 1", i.e. a win |
+
+Members, behind one interface in `clients/sports_providers.py`:
+
+| Provider | What it reads | Role |
+|---|---|---|
+| `elo` | Elo replayed over the completed games the bot has collected | recent form |
+| `log5` | Bradley-Terry / log5 on season win-loss records | season-long strength |
+| `pythagorean` | expected win rate from runs/points scored and allowed | strength net of luck |
+| `espn_bookmaker` | DraftKings line via ESPN — **off by default** | market comparison |
+| `espn_scoreboard` | live score, inning/quarter, final status | observation clamp |
+
+All of it comes from ESPN's public endpoints — free, no key, no registration
+(`clients/espn_client.py`). Nothing new needs to be signed up for.
+
+**The live-score clamp** is the same statement as the weather model's "the day's
+high can only be at or above what's already been observed": the final margin is
+the current lead *plus* whatever happens in the innings left, so as a game runs
+out the lead becomes decisive and the remaining uncertainty shrinks with the
+square root of the time remaining. A 3-run lead in the 2nd and the same lead in
+the 8th are priced very differently, and once the game is final the answer is 0
+or 1. This is also why the model **refuses to have an opinion** on a game that has
+started when the score feed is stale (`sports.max_state_age_seconds`) — an
+in-progress game with a dead feed is exactly where a pre-game probability is most
+confidently wrong.
+
+**Two honest caveats**, both of which are the reason for a config knob rather
+than a footnote:
+
+1. **The members are not independent.** The weather ensemble combines genuinely
+   different physical models, so their disagreement is a fair proxy for
+   uncertainty. Elo, log5 and pythagorean all read the same season of the same
+   games from the same feed: they agree far more than they are jointly right, so
+   their spread *understates* real uncertainty. `model.min_sigma_floor` puts a
+   floor under the ensemble's sigma so a false consensus cannot be priced as
+   confidence.
+2. **The bookmaker member is off by default.** A sportsbook line is not a
+   prediction method, it is another market's price. Switching it on changes the
+   question from "can an independent model find mispricing?" to "does Kalshi
+   disagree with DraftKings?" — a legitimate and probably more profitable
+   question, but a different one, and it would dominate the ensemble. Turn it on
+   deliberately, knowing which experiment you are now running.
+
+To run the sports family, set `market_family: sports` in `config.yaml` (the
+example file ships with an MLB league block filled in and NFL commented out) and
+point `storage.db_path` at a separate database if you also run the weather one —
+one family per process.
+
+Two things to know about the first day or two of sports collection:
+
+- **Elo starts cold.** It replays only the results the bot has collected
+  (`sports.results_lookback_days`), starting everyone at 1500, so on the very
+  first run it abstains until each team has `elo_min_games` games in the history.
+  The record-based members work immediately.
+- **Every market must be linked to a real game first.** Kalshi's ticker
+  (`KXMLBGAME-26JUL282210SEALAD-SEA`) names the teams but not which is at home, so
+  each market is matched to an ESPN game before the model will price it. If a
+  league logs repeated `no ESPN game matched` warnings, its team codes disagree
+  with ESPN's and need adding to the per-league table in `clients/espn_client.py`
+  (verified there for MLB and NFL).
 
 ## Requirements
 
@@ -225,11 +307,19 @@ Coverage includes: the exact fee math at every boundary, the funding denylist
 (and that the client routes through it), the structural no-lookahead guarantee,
 every risk gate (never mocked away), settlement/P&L math, circuit-breaker
 persistence + manual-only reset, and a full-pipeline integration test with live
-execution disabled.
+execution disabled — for **both** families.
+
+The sports tests also pin the things that would silently price the wrong game:
+that the YES team comes from the ticker and not the sub-titles (which are
+identical on both sides of a live market), that MLB tickers carry a start time and
+NFL ones do not, that a market matched to no game yields no opinion rather than a
+guess, that the two sides of a game always sum to 1, and that a started game with
+a stale score feed is declined.
 
 ## Out of scope for Phase 1 (deliberately)
 
-Deposits/withdrawals (permanently), sports/crypto/election markets, any size
-above 1 contract, Kelly/bankroll sizing, cross-venue arbitrage, machine-learned
-models (the weather model is explicit so its mistakes are legible), and any web
-UI or dashboard — this phase is CLI only.
+Deposits/withdrawals (permanently), crypto/election markets, sports markets other
+than game winners (totals and spreads are parsed and then *declined*, not
+half-understood), any size above 1 contract, Kelly/bankroll sizing, cross-venue
+arbitrage, machine-learned models (both models are explicit so their mistakes are
+legible), and any web UI or dashboard — this phase is CLI only.

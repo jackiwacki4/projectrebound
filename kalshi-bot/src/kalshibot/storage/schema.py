@@ -9,7 +9,7 @@ Design rules:
   are immutable once written. Storage is cheap; lost history is unrecoverable.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -86,6 +86,78 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS ix_obs_station_ts ON observations(station, obs_ts);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_obs_station_obsts ON observations(station, obs_ts);
+
+-- ==========================================================================
+-- Sports family. Structurally the same three roles as weather:
+--   sports_games       reference data (which teams, when)  ~ markets
+--   sports_ratings     one ensemble member's prediction     ~ forecasts
+--   sports_game_states what has actually happened so far    ~ observations
+--   sports_results     settled games, the input to the form/Elo member
+-- ==========================================================================
+
+-- The game behind a pair of sports markets. Reference data, but stamped with
+-- when WE first resolved it so the as-of view can hide it from earlier instants.
+CREATE TABLE IF NOT EXISTS sports_games (
+    game_key        TEXT PRIMARY KEY, -- Kalshi event ticker (KXMLBGAME-26JUL282210SEALAD)
+    league          TEXT NOT NULL,    -- mlb | nfl | ...
+    series          TEXT NOT NULL,    -- Kalshi series ticker
+    away_code       TEXT NOT NULL,    -- Kalshi team codes (SEA, LAD, AZ, CWS ...)
+    home_code       TEXT NOT NULL,
+    start_ts        INTEGER,          -- scheduled first pitch / kickoff (ms)
+    source_event_id TEXT,             -- ESPN event id this was matched to
+    first_seen_ts   INTEGER NOT NULL,
+    updated_ts      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_sports_games_league ON sports_games(league, start_ts);
+
+-- Append-only ensemble member predictions. One row per (provider, game, poll):
+-- the expected home margin, plus the win probability it implies (stored for
+-- legibility -- the model recomputes from the margin).
+CREATE TABLE IF NOT EXISTS sports_ratings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider     TEXT NOT NULL,       -- elo | log5 | pythagorean | espn_bookmaker
+    game_key     TEXT NOT NULL,
+    league       TEXT NOT NULL,
+    issued_ts    INTEGER NOT NULL,    -- when the source produced it (ms)
+    fetched_ts   INTEGER NOT NULL,    -- when WE knew it (ms) -- the no-lookahead key
+    margin_home  REAL,                -- expected home_score - away_score
+    p_home       REAL,                -- implied P(home wins)
+    raw          TEXT NOT NULL        -- JSON of the member's own workings
+);
+CREATE INDEX IF NOT EXISTS ix_sports_ratings_game ON sports_ratings(game_key, fetched_ts);
+CREATE INDEX IF NOT EXISTS ix_sports_ratings_provider
+    ON sports_ratings(provider, game_key, fetched_ts);
+
+-- Append-only live game state: the sports analog of a METAR observation. One
+-- row per poll (not per state change) on purpose -- an unchanged score still
+-- proves the feed is alive, and the model refuses to clamp on a stale state.
+CREATE TABLE IF NOT EXISTS sports_game_states (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_key      TEXT NOT NULL,
+    obs_ts        INTEGER NOT NULL,   -- source time if known, else fetch time (ms)
+    captured_ts   INTEGER NOT NULL,
+    state         TEXT NOT NULL,      -- pre | in | post
+    completed     INTEGER NOT NULL,   -- 1 once the source calls it final
+    period        INTEGER,            -- inning / quarter / period, 1-indexed
+    home_score    INTEGER,
+    away_score    INTEGER,
+    raw           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_sports_states_game ON sports_game_states(game_key, captured_ts);
+
+-- Append-only completed-game results. Not read by the model directly: the Elo
+-- member replays these at collection time to produce a rating row.
+CREATE TABLE IF NOT EXISTS sports_results (
+    source_event_id TEXT PRIMARY KEY, -- ESPN event id; makes re-polling idempotent
+    league          TEXT NOT NULL,
+    start_ts        INTEGER NOT NULL,
+    away_code       TEXT NOT NULL,
+    home_code       TEXT NOT NULL,
+    away_score      INTEGER NOT NULL,
+    home_score      INTEGER NOT NULL,
+    recorded_ts     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_sports_results_league ON sports_results(league, start_ts);
 
 -- Append-only decision log: the probability, the inputs that produced it, and
 -- the book state at decision time. Cannot be reconstructed after the fact.

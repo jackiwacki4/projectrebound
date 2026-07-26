@@ -45,6 +45,42 @@ class BookRow:
     best_no_ask: Optional[int]
 
 
+@dataclass(frozen=True)
+class SportsGameRow:
+    game_key: str
+    league: str
+    series: str
+    away_code: str
+    home_code: str
+    start_ts: Optional[int]
+    source_event_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class SportsRatingRow:
+    provider: str
+    game_key: str
+    league: str
+    issued_ts: int
+    fetched_ts: int
+    margin_home: Optional[float]
+    p_home: Optional[float]
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SportsStateRow:
+    game_key: str
+    obs_ts: int
+    captured_ts: int
+    state: str                  # "pre" | "in" | "post"
+    completed: bool
+    period: Optional[int]
+    home_score: Optional[int]
+    away_score: Optional[int]
+    raw: dict[str, Any]
+
+
 class AsOfView:
     """A read-only window into the DB as it was known at `as_of_ms`.
 
@@ -153,6 +189,74 @@ class AsOfView:
             (station, self._as_of),
         ).fetchone()["c"]
 
+    # ---- sports family (same as-of discipline as above) ----
+    def sports_game(self, game_key: str) -> Optional[SportsGameRow]:
+        """Which teams, and which is at home. Filtered on first_seen_ts so a
+        game we had not yet resolved is invisible to an earlier as-of instant."""
+        row = self._conn.execute(
+            """
+            SELECT game_key, league, series, away_code, home_code, start_ts, source_event_id
+            FROM sports_games
+            WHERE game_key = ? AND first_seen_ts <= ?
+            """,
+            (game_key, self._as_of),
+        ).fetchone()
+        if row is None:
+            return None
+        return SportsGameRow(
+            game_key=row["game_key"], league=row["league"], series=row["series"],
+            away_code=row["away_code"], home_code=row["home_code"],
+            start_ts=row["start_ts"], source_event_id=row["source_event_id"],
+        )
+
+    def latest_sports_ratings_by_provider(self, game_key: str) -> dict[str, SportsRatingRow]:
+        """Each rating provider's most recent prediction for the game, as-of now.
+
+        The sports counterpart of `latest_forecasts_by_provider`: one ensemble
+        member per source, all filtered by fetched_ts <= as_of.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT provider, game_key, league, issued_ts, fetched_ts,
+                   margin_home, p_home, raw
+            FROM sports_ratings
+            WHERE game_key = ? AND fetched_ts <= ?
+            ORDER BY fetched_ts DESC, id DESC
+            """,
+            (game_key, self._as_of),
+        ).fetchall()
+        out: dict[str, SportsRatingRow] = {}
+        for row in rows:
+            out.setdefault(row["provider"], SportsRatingRow(
+                provider=row["provider"], game_key=row["game_key"], league=row["league"],
+                issued_ts=row["issued_ts"], fetched_ts=row["fetched_ts"],
+                margin_home=row["margin_home"], p_home=row["p_home"],
+                raw=json.loads(row["raw"]),
+            ))  # first seen = most recent per provider
+        return out
+
+    def latest_game_state(self, game_key: str) -> Optional[SportsStateRow]:
+        """The most recent live state we had captured for the game, as-of now."""
+        row = self._conn.execute(
+            """
+            SELECT game_key, obs_ts, captured_ts, state, completed, period,
+                   home_score, away_score, raw
+            FROM sports_game_states
+            WHERE game_key = ? AND captured_ts <= ?
+            ORDER BY captured_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (game_key, self._as_of),
+        ).fetchone()
+        if row is None:
+            return None
+        return SportsStateRow(
+            game_key=row["game_key"], obs_ts=row["obs_ts"], captured_ts=row["captured_ts"],
+            state=row["state"], completed=bool(row["completed"]), period=row["period"],
+            home_score=row["home_score"], away_score=row["away_score"],
+            raw=json.loads(row["raw"]),
+        )
+
 
 # --------------------------------------------------------------------------
 # Full DAO: writers + latest readers (collectors, reporting).
@@ -246,6 +350,69 @@ class Dao:
             "VALUES(?,?,?,?,?)",
             (station, obs_ts, now_ms(), temp_c, json.dumps(raw)),
         )
+
+    # ---- sports family writers ----
+    def upsert_sports_game(self, *, game_key: str, league: str, series: str,
+                           away_code: str, home_code: str, start_ts: Optional[int],
+                           source_event_id: Optional[str]) -> None:
+        ts = now_ms()
+        self.conn.execute(
+            """
+            INSERT INTO sports_games(game_key, league, series, away_code, home_code,
+                                     start_ts, source_event_id, first_seen_ts, updated_ts)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(game_key) DO UPDATE SET
+                league=excluded.league, series=excluded.series,
+                away_code=excluded.away_code, home_code=excluded.home_code,
+                start_ts=COALESCE(excluded.start_ts, sports_games.start_ts),
+                source_event_id=COALESCE(excluded.source_event_id,
+                                         sports_games.source_event_id),
+                updated_ts=excluded.updated_ts
+            """,
+            (game_key, league, series, away_code, home_code, start_ts,
+             source_event_id, ts, ts),
+        )
+
+    def insert_sports_rating(self, *, provider: str, game_key: str, league: str,
+                             issued_ts: int, margin_home: Optional[float],
+                             p_home: Optional[float], raw: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO sports_ratings(provider, game_key, league, issued_ts, fetched_ts, "
+            "margin_home, p_home, raw) VALUES(?,?,?,?,?,?,?,?)",
+            (provider, game_key, league, issued_ts, now_ms(), margin_home, p_home,
+             json.dumps(raw)),
+        )
+
+    def insert_sports_game_state(self, *, game_key: str, obs_ts: int, state: str,
+                                 completed: bool, period: Optional[int],
+                                 home_score: Optional[int], away_score: Optional[int],
+                                 raw: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO sports_game_states(game_key, obs_ts, captured_ts, state, "
+            "completed, period, home_score, away_score, raw) VALUES(?,?,?,?,?,?,?,?,?)",
+            (game_key, obs_ts, now_ms(), state, 1 if completed else 0, period,
+             home_score, away_score, json.dumps(raw)),
+        )
+
+    def upsert_sports_result(self, *, source_event_id: str, league: str, start_ts: int,
+                             away_code: str, home_code: str, away_score: int,
+                             home_score: int) -> None:
+        # Scores are final, so the first record wins; re-polling is a no-op.
+        self.conn.execute(
+            "INSERT INTO sports_results(source_event_id, league, start_ts, away_code, "
+            "home_code, away_score, home_score, recorded_ts) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(source_event_id) DO NOTHING",
+            (source_event_id, league, start_ts, away_code, home_code, away_score,
+             home_score, now_ms()),
+        )
+
+    def completed_games(self, league: str, since_ts: int = 0) -> list[sqlite3.Row]:
+        """Finished games in chronological order -- the Elo member's input."""
+        return self.conn.execute(
+            "SELECT * FROM sports_results WHERE league=? AND start_ts >= ? "
+            "ORDER BY start_ts",
+            (league, since_ts),
+        ).fetchall()
 
     def insert_decision(self, *, decision_ts: int, ticker: str, model_name: str,
                         probability: float, uncertainty: Optional[float], inputs: dict,
