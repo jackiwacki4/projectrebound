@@ -57,8 +57,20 @@ def _c_to_f(c: Optional[float]) -> Optional[float]:
 
 def _get_json(url: str, timeout: int = 20) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Include the response body: these APIs explain *why* in a JSON "reason"
+        # field, and a bare "HTTP Error 400: Bad Request" hides it.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        raise urllib.error.HTTPError(
+            e.url, e.code, f"{e.reason} -- {body}" if body else str(e.reason),
+            e.headers, None) from None
 
 
 # --------------------------------------------------------------------------
@@ -167,11 +179,22 @@ class MetarObservationProvider(ObservationProvider):
 # --------------------------------------------------------------------------
 # Build providers from config
 # --------------------------------------------------------------------------
+# Open-Meteo model identifiers. VERIFIED EMPIRICALLY against the live API
+# (2026-07) by querying each candidate and confirming it returns real daily
+# highs -- documentation summaries listed names the API rejects with HTTP 400.
+# If a member ever starts failing, hit the API directly with ?models=<name> and
+# read the JSON "reason" before changing anything here.
+#
+# Deliberately chosen so members are genuinely INDEPENDENT (same location, same
+# day, at verification time: HRRR 77.6F, GFS 82.1F, ECMWF 79.8F). `gfs_seamless`
+# is excluded on purpose: it blends HRRR into the near term and so duplicates
+# the HRRR member, which would fake ensemble agreement.
 _OPEN_METEO_MODELS = {
-    "open_meteo_best": None,
-    "open_meteo_hrrr": "ncep_hrrr_us_conus",
-    "open_meteo_gfs": "ncep_gfs_global_0_25",
-    "open_meteo_ecmwf": "ecmwf_ifs_0_25",
+    "open_meteo_best": None,               # Open-Meteo's own auto blend
+    "open_meteo_hrrr": "gfs_hrrr",         # NOAA HRRR, high-res short-range
+    "open_meteo_gfs": "gfs_global",        # NOAA GFS, global
+    "open_meteo_ecmwf": "ecmwf_ifs025",    # ECMWF IFS 0.25deg open data
+    "open_meteo_ecmwf_ai": "ecmwf_aifs025_single",  # ECMWF AIFS (AI model), optional
 }
 
 

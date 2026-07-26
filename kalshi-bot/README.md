@@ -63,6 +63,7 @@ confidently). Providers, all free and quick, behind one interface in
 | `open_meteo_hrrr` | NOAA **HRRR** (high-res short-range) | forecast member |
 | `open_meteo_gfs` | NOAA **GFS** (global) | forecast member |
 | `open_meteo_ecmwf` | **ECMWF IFS** open data | forecast member |
+| `open_meteo_ecmwf_ai` | ECMWF **AIFS** (their AI model) — off by default | forecast member |
 | `metar` | airport **METAR** observations (aviationweather.gov) | observation clamp |
 
 The METAR feed is what has *actually happened* so far today — the model uses it
@@ -200,6 +201,17 @@ Certificate verification is never disabled to work around this.
 is simply left out of that cycle's ensemble, and the model uses whichever
 sources did respond. Persistent failures from *every* provider mean a network
 or certificate problem, not a market problem.
+
+**`HTTP Error 400` from an Open-Meteo member** — the model identifier is wrong
+or has been renamed. Errors now carry the API's own explanation, so the log
+will name the offending value. Confirm the current name by querying the API
+directly and reading the JSON `reason`:
+
+```sh
+curl "https://api.open-meteo.com/v1/forecast?latitude=41.786&longitude=-87.752&daily=temperature_2m_max&timezone=auto&models=gfs_hrrr"
+```
+
+then update `_OPEN_METEO_MODELS` in `clients/forecast_providers.py`.
 
 ## Tests
 
