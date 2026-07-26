@@ -37,7 +37,9 @@ def test_ensemble_combines_providers_and_widens_sigma_on_disagreement(dao):
     # effective sigma grows with disagreement: sqrt(3^2 + 2^2) = sqrt(13) ~ 3.61
     assert 3.6 < pred.uncertainty < 3.62
     assert set(pred.inputs["ensemble_members"]) == {"nws", "open_meteo_hrrr", "open_meteo_gfs"}
-    assert 0.70 < pred.probability < 0.72                    # P(high>=88 | 90, 3.61)
+    # floor_strike 88 means "89 or above", so the boundary is 88.5, not 88:
+    # P(X > 88.5 | mean 90, sigma 3.606) ~ 0.661.
+    assert 0.65 < pred.probability < 0.67
 
 
 def test_observation_clamp_forces_certainty_when_already_reached(dao):

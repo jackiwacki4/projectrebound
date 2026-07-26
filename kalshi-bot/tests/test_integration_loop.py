@@ -80,9 +80,10 @@ def test_pipeline_records_paper_and_passes_gates_but_places_no_live_order(dao, t
     assert intent.limit_price_cents == 30      # 100 - best_no_bid(70)
     assert gate.passed
 
-    # Model probability ~0.7475 for high>=88 given mean 90, sigma 3.
+    # floor_strike 88 means "89 or above", so the boundary is 88.5:
+    # P(X > 88.5 | mean 90, sigma 3) = 0.6915.
     p = dao.conn.execute("SELECT probability FROM decisions").fetchone()["probability"]
-    assert 0.74 < p < 0.76
+    assert 0.68 < p < 0.70
 
     paper = dao.conn.execute("SELECT * FROM paper_fills").fetchall()
     assert len(paper) == 1
