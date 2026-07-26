@@ -20,6 +20,7 @@ from datetime import date
 from typing import Any, Optional
 
 from ..util import iso_to_ms
+from .ssl_support import ssl_context
 
 _USER_AGENT_DEFAULT = "(projectrebound-phase1, kalshibot@example.com)"
 
@@ -51,7 +52,7 @@ class NwsClient:
             "Accept": "application/geo+json",
         })
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=20, context=ssl_context()) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             raise NwsApiError(f"NWS {url} -> {e.code}: {e.read()[:200]!r}") from None

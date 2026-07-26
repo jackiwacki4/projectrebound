@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from ..util import iso_to_ms, now_ms
 from .nws_client import NwsClient
+from .ssl_support import ssl_context
 
 _UA = "(projectrebound-phase1, kalshibot@example.com)"
 
@@ -56,7 +57,7 @@ def _c_to_f(c: Optional[float]) -> Optional[float]:
 
 def _get_json(url: str, timeout: int = 20) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -79,14 +80,14 @@ class NwsForecastProvider(ForecastProvider):
         self._nws = client or NwsClient(_UA)
 
     def forecast_highs(self, lat: float, lon: float, days: int) -> list[ProviderForecast]:
+        # Errors deliberately propagate: the collector catches and LOGS them per
+        # provider. Swallowing them here made real outages (expired certs, API
+        # downtime) look like "no forecast available", which is much worse.
         out: list[ProviderForecast] = []
         today = date.today()
         for d in range(days):
             target = (today + timedelta(days=d)).isoformat()
-            try:
-                fh = self._nws.forecast_high(lat, lon, target)
-            except Exception:
-                continue
+            fh = self._nws.forecast_high(lat, lon, target)
             if fh and fh.high_f is not None:
                 out.append(ProviderForecast(self.name, target, fh.high_f, fh.issued_ts, fh.raw))
         return out
@@ -147,10 +148,8 @@ class MetarObservationProvider(ObservationProvider):
                             ) -> list[ProviderObservation]:
         url = self._BASE + "?" + urllib.parse.urlencode(
             {"ids": station, "format": "json", "hours": "3"})
-        try:
-            data = _get_json(url)
-        except Exception:
-            return []
+        # Errors propagate so the collector logs them (see NwsForecastProvider).
+        data = _get_json(url)
         rows = data if isinstance(data, list) else data.get("data", [])
         out: list[ProviderObservation] = []
         for r in rows or []:

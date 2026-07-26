@@ -34,6 +34,7 @@ from ..config import Credentials
 from ..util import now_ms
 from .http_guard import assert_path_allowed
 from .rate_limiter import TokenBucket
+from .ssl_support import ssl_context
 
 
 class KalshiApiError(RuntimeError):
@@ -105,7 +106,7 @@ class KalshiClient:
         req = urllib.request.Request(url, data=data, method=method,
                                      headers=self._headers(method, full_path))
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15, context=ssl_context()) as resp:
                 return json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as e:
             payload = e.read().decode("utf-8", "replace")

@@ -7,3 +7,4 @@
 cryptography>=42.0      # RSA-PSS request signing for Kalshi auth
 PyYAML>=6.0             # config files
 websockets>=12.0        # Kalshi real-time order-book feed
+certifi>=2024.2.2       # CA roots, so HTTPS works on python.org macOS builds

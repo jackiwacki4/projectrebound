@@ -183,6 +183,24 @@ Live trading places real orders. Even at 1 contract, do this first:
    kalshi.com/docs/kalshi-fee-schedule.pdf.
 4. Only then switch `KALSHI_ENVIRONMENT=prod`.
 
+## Troubleshooting
+
+**`CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`** — a
+python.org macOS install that never wired up its CA roots. The bot now prefers
+`certifi`'s bundle automatically (installed by `setup.sh`), so re-running
+`./setup.sh` fixes it. Python's own installer also ships a fix:
+
+```sh
+/Applications/Python\ 3.x/Install\ Certificates.command   # match your version
+```
+
+Certificate verification is never disabled to work around this.
+
+**Warnings from a single provider** are normal and safe — a provider that fails
+is simply left out of that cycle's ensemble, and the model uses whichever
+sources did respond. Persistent failures from *every* provider mean a network
+or certificate problem, not a market problem.
+
 ## Tests
 
 ```sh
