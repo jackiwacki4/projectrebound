@@ -67,23 +67,38 @@ class NwsClient:
             )["properties"]
         return self._point_cache[key]
 
-    def forecast_high(self, lat: float, lon: float, target_date: str) -> Optional[ForecastHigh]:
-        """Forecast daily high (deg F) for `target_date` (YYYY-MM-DD local)."""
+    def all_forecast_highs(self, lat: float, lon: float) -> list[ForecastHigh]:
+        """Every daytime high in one fetch.
+
+        The NWS forecast response already contains the whole horizon, so this
+        is ONE request per location. Asking day-by-day would re-download the
+        identical payload once per day -- slow for us and rude to a free
+        government API.
+        """
         forecast_url = self._point(lat, lon)["forecast"]
         props = self._get(forecast_url)["properties"]
         issued_ts = iso_to_ms(props["updateTime"])
+        out: list[ForecastHigh] = []
         for period in props.get("periods", []):
-            start = period.get("startTime", "")
+            if not period.get("isDaytime"):
+                continue
             # startTime is local ISO with offset, e.g. 2026-07-24T06:00:00-05:00
-            if period.get("isDaytime") and start[:10] == target_date:
-                temp = period.get("temperature")
-                unit = (period.get("temperatureUnit") or "F").upper()
-                high_f = float(temp) if unit == "F" else _c_to_f(float(temp))
-                return ForecastHigh(target_date=target_date, high_f=high_f,
-                                    issued_ts=issued_ts, raw=period)
-        # No daytime period for that date (e.g. it's already evening).
-        return ForecastHigh(target_date=target_date, high_f=None,
-                            issued_ts=issued_ts, raw={})
+            target_date = (period.get("startTime") or "")[:10]
+            temp = period.get("temperature")
+            if not target_date or temp is None:
+                continue
+            unit = (period.get("temperatureUnit") or "F").upper()
+            high_f = float(temp) if unit == "F" else _c_to_f(float(temp))
+            out.append(ForecastHigh(target_date=target_date, high_f=high_f,
+                                    issued_ts=issued_ts, raw=period))
+        return out
+
+    def forecast_high(self, lat: float, lon: float, target_date: str) -> Optional[ForecastHigh]:
+        """Forecast daily high (deg F) for a single `target_date` (YYYY-MM-DD)."""
+        for fh in self.all_forecast_highs(lat, lon):
+            if fh.target_date == target_date:
+                return fh
+        return None
 
     def observations(self, station: str, start_iso: str, end_iso: str) -> list[dict]:
         """Raw observations for a station over [start, end] (ISO-8601)."""

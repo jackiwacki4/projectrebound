@@ -95,14 +95,10 @@ class NwsForecastProvider(ForecastProvider):
         # Errors deliberately propagate: the collector catches and LOGS them per
         # provider. Swallowing them here made real outages (expired certs, API
         # downtime) look like "no forecast available", which is much worse.
-        out: list[ProviderForecast] = []
-        today = date.today()
-        for d in range(days):
-            target = (today + timedelta(days=d)).isoformat()
-            fh = self._nws.forecast_high(lat, lon, target)
-            if fh and fh.high_f is not None:
-                out.append(ProviderForecast(self.name, target, fh.high_f, fh.issued_ts, fh.raw))
-        return out
+        horizon = {(date.today() + timedelta(days=d)).isoformat() for d in range(days)}
+        return [ProviderForecast(self.name, fh.target_date, fh.high_f, fh.issued_ts, fh.raw)
+                for fh in self._nws.all_forecast_highs(lat, lon)   # one request, all days
+                if fh.high_f is not None and fh.target_date in horizon]
 
 
 class OpenMeteoForecastProvider(ForecastProvider):
