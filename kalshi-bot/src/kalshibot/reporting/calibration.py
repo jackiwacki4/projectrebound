@@ -82,6 +82,7 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
         lines.append("** read as evidence of edge or its absence. Keep collecting.")
     lines.append("")
 
+    _activity_section(conn, lines)
     _calibration_section(conn, lines)
     _accuracy_by_time_to_settlement(conn, lines)
     _edge_section(conn, lines)
@@ -90,6 +91,66 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     _divergence_section(conn, lines)
 
     return Report(text="\n".join(lines), resolved_count=resolved)
+
+
+def _activity_section(conn, lines: list[str]) -> None:
+    """Is it actually working? Distinguishes "healthy but young" (collecting,
+    deciding, nothing settled yet) from "silently doing nothing" -- which
+    otherwise look identical when the resolved-sample count is 0."""
+    def one(sql: str, *args):
+        row = conn.execute(sql, args).fetchone()
+        return row[0] if row else 0
+
+    decisions = one("SELECT COUNT(*) FROM decisions")
+    passed = one("SELECT COUNT(*) FROM decisions WHERE gate_passed=1")
+    paper = one("SELECT COUNT(*) FROM paper_fills")
+    pending = one("SELECT COUNT(*) FROM paper_fills f "
+                  "WHERE f.ticker NOT IN (SELECT ticker FROM settlements)")
+    books = one("SELECT COUNT(*) FROM book_snapshots")
+    books_usable = one(
+        "SELECT COUNT(*) FROM book_snapshots WHERE yes_levels != '[]' OR no_levels != '[]'")
+    forecasts = one("SELECT COUNT(*) FROM forecasts")
+    providers = one("SELECT COUNT(DISTINCT provider) FROM forecasts")
+    obs = one("SELECT COUNT(*) FROM observations")
+    markets = one("SELECT COUNT(*) FROM markets")
+    settled = one("SELECT COUNT(*) FROM settlements")
+    last_book = one("SELECT MAX(captured_ts) FROM book_snapshots")
+
+    lines.append("-- Activity (is it working?) --")
+    lines.append(f"  data collected : {books} book snapshots ({books_usable} with live quotes), "
+                 f"{forecasts} forecasts from {providers} sources, {obs} observations")
+    lines.append(f"  markets tracked: {markets}   settled so far: {settled}")
+    lines.append(f"  decisions made : {decisions}  (passed all risk gates: {passed})")
+    lines.append(f"  paper trades   : {paper}  ({pending} awaiting settlement)")
+
+    blocked = conn.execute(
+        "SELECT blocked_by, COUNT(*) AS c FROM decisions "
+        "WHERE gate_passed=0 AND blocked_by IS NOT NULL GROUP BY blocked_by ORDER BY c DESC"
+    ).fetchall()
+    if blocked:
+        detail = ", ".join(f"{r['blocked_by']} x{r['c']}" for r in blocked)
+        lines.append(f"  blocked by     : {detail}")
+
+    if last_book:
+        age_min = (int(datetime.now(tz=timezone.utc).timestamp() * 1000) - last_book) / 60000
+        lines.append(f"  last data point: {age_min:.0f} minutes ago")
+
+    # Plain-language diagnosis, so a zero never has to be interpreted by hand.
+    if decisions == 0:
+        if books == 0:
+            lines.append("  >> NOT COLLECTING. No order books stored -- check the run window for errors.")
+        elif books_usable == 0:
+            lines.append("  >> Collecting, but every order book has been EMPTY (no live quotes).")
+            lines.append("     Normal for thin markets overnight; should populate during the day.")
+        elif forecasts == 0:
+            lines.append("  >> Collecting prices but NO forecasts -- the weather sources are failing.")
+        else:
+            lines.append("  >> Data is arriving but no decisions yet. Usually means no market has")
+            lines.append("     cleared the minimum-edge bar -- which is the gates doing their job.")
+    elif settled == 0:
+        lines.append("  >> WORKING. Decisions are being made; nothing has settled yet, so the")
+        lines.append("     scoring sections below stay empty until markets resolve (daily).")
+    lines.append("")
 
 
 def _accuracy_by_time_to_settlement(conn, lines: list[str]) -> None:
