@@ -1,5 +1,6 @@
 """Command-line entrypoint.
 
+    kalshibot check            preflight: credentials, Kalshi, markets, data feed
     kalshibot run              start the 24/7 collection + decision loop
     kalshibot report           print the Phase 1 validation report
     kalshibot health           print a health snapshot (JSON)
@@ -73,6 +74,108 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_check(args) -> int:
+    """Preflight in plain English: credentials, Kalshi, markets, data feed.
+
+    Exists because the runtime can only report that something failed, not why --
+    `_read_balance` swallows the API error by design so a bad balance read cannot
+    crash collection. That leaves a bare "could not read account balance" in the
+    log with no cause, which is a dead end for anyone not reading the source. This
+    command makes the same calls and shows what actually came back.
+
+    Read-only, and writes nothing: no database, no config, no log files.
+    """
+    cfg = load_config(args.config)
+    creds = load_credentials()
+    failures: list[str] = []
+
+    def say(good: bool, msg: str, *advice: str) -> None:
+        print(("ok  " if good else "X   ") + msg)
+        for line in advice:
+            print(f"      {line}")
+        if not good:
+            failures.append(msg)
+
+    print(f"\nChecking setup for the '{cfg.market_family}' family ({args.config})\n")
+
+    problem = _check_credentials(creds)
+    if problem:
+        print("X   credentials are not set up yet\n")
+        print(problem)
+        return 1
+    tail = creds.api_key_id[-6:] if len(creds.api_key_id) > 6 else creds.api_key_id
+    say(True, f"credentials found (key id ends ...{tail}, environment '{creds.environment}')")
+
+    from .clients.kalshi_client import KalshiClient
+    client = None
+    try:
+        client = KalshiClient(creds)
+        say(True, "private key file loads")
+    except Exception:
+        # The raw OpenSSL "could not deserialize key data" is noise to anyone who
+        # is not debugging a cipher. Kalshi's own error text below IS the
+        # diagnostic, so that one is printed verbatim -- this one is not.
+        say(False, "the private key file will not load",
+            f"The file at {creds.private_key_path} is not a valid PEM private key.",
+            "It must be the file Kalshi gave you when you created the API key,",
+            "starting with a line like -----BEGIN PRIVATE KEY-----.",
+            "If you saved it as text, check nothing was cut off or wrapped.")
+
+    if client is not None:
+        try:
+            balance = int(client.get_balance().get("balance"))
+            say(True, f"Kalshi accepted the key -- account balance ${balance/100:,.2f}"
+                      + ("  (unfunded, which is fine for collecting data)" if balance == 0 else ""))
+        except Exception as e:
+            say(False, f"Kalshi rejected the request: {e}",
+                "Usually one of three things:",
+                "  1. The Key ID in .env is not the one that goes with this key file.",
+                f"  2. The key was created in the other environment (yours says '{creds.environment}';"
+                " a key made on kalshi.com is 'prod', one made on demo-api is 'demo').",
+                "  3. The key was deleted or regenerated in Kalshi since.",
+                "Data collection still works without this -- it only blocks live orders.")
+
+        series = ([c.kalshi_series for c in cfg.cities] if cfg.market_family == "weather"
+                  else [lg.kalshi_series for lg in cfg.leagues])
+        for ticker in series:
+            try:
+                markets = client.list_markets(series_ticker=ticker, status="open")
+                say(bool(markets), f"{ticker}: {len(markets)} open markets",
+                    *([] if markets else
+                      ["No open markets right now. Normal out of season, or if the",
+                       "series ticker has changed -- check it on kalshi.com."]))
+            except Exception as e:
+                say(False, f"{ticker}: could not list markets: {e}")
+
+    # The free data feed the model actually depends on.
+    try:
+        if cfg.market_family == "sports":
+            from .clients.espn_client import EspnClient
+            league = cfg.leagues[0]
+            teams = EspnClient().standings(league.espn_path, league.name)
+            say(bool(teams), f"ESPN reachable -- {len(teams)} {league.name} teams in standings",
+                *([] if teams else
+                  ["Standings are empty, which happens out of season. Two of the three",
+                   "rating methods need them, so the model will mostly abstain until",
+                   "the season starts."]))
+        else:
+            from .clients.forecast_providers import NwsForecastProvider
+            city = cfg.cities[0]
+            highs = NwsForecastProvider().forecast_highs(city.lat, city.lon, 2)
+            say(bool(highs), f"NWS reachable -- {len(highs)} forecast days for {city.name}")
+    except Exception as e:
+        say(False, f"the data feed is not reachable: {e}",
+            "Check your internet connection. No API key is needed for this one.")
+
+    print()
+    if failures:
+        print(f"{len(failures)} thing(s) above need fixing. Everything marked 'ok' is working.")
+        return 1
+    print("All good. Start collecting with:")
+    print(f"    ./run.sh run --config {args.config}")
+    return 0
+
+
 def cmd_report(args) -> int:
     cfg = load_config(args.config)
     report = generate_report(_dao(cfg), stake_dollars=args.stake)
@@ -122,8 +225,9 @@ def main(argv=None) -> int:
     parser.add_argument("--config", default="config/config.yaml", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
     for name, fn in [
-        ("run", cmd_run), ("report", cmd_report), ("health", cmd_health),
-        ("reset-breaker", cmd_reset_breaker), ("init", cmd_init),
+        ("run", cmd_run), ("check", cmd_check), ("report", cmd_report),
+        ("health", cmd_health), ("reset-breaker", cmd_reset_breaker),
+        ("init", cmd_init),
     ]:
         p = sub.add_parser(name, parents=[common])
         if name == "report":

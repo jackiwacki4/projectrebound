@@ -276,17 +276,22 @@ def test_extra_innings_keeps_a_sliver_of_uncertainty():
 # Structural guarantees
 # --------------------------------------------------------------------------
 def test_no_lookahead_across_members(dao):
-    T = now_ms()
+    # Seed the game FIRST, then pick the decision instant after it: like
+    # observations, upsert_sports_game stamps first_seen_ts at insertion time, so
+    # an as-of of exactly `now` races the write and the game row can land a
+    # millisecond in the "future" -- correctly hidden, but flaky here.
     _seed_game(dao)
+    T = now_ms() + _DECIDE_AFTER_MS
     _seed_rating(dao, "elo", 0.5, fetched_ts=T - 1000)      # known
     _seed_rating(dao, "log5", 9.0, fetched_ts=T + 1000)     # not yet known
     pred = _predict(dao, _market("LAD"), T)
+    assert pred is not None
     assert list(pred.inputs["ensemble_members"]) == ["elo"]
 
 
 def test_latest_per_member_wins(dao):
-    T = now_ms()
     _seed_game(dao)
+    T = now_ms() + _DECIDE_AFTER_MS
     _seed_rating(dao, "elo", 0.1, fetched_ts=T - 5000)
     _seed_rating(dao, "elo", 2.5, fetched_ts=T - 1000)
     members = dao.as_of(T).latest_sports_ratings_by_provider(GAME_KEY)

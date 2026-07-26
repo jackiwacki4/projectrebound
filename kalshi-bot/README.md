@@ -204,6 +204,7 @@ instead of raising a traceback.
 Other commands:
 
 ```sh
+./run.sh check               # preflight: credentials, Kalshi, markets, data feed
 ./run.sh report              # validation report + per-trade ledger
 ./run.sh report --stake 25   # same, with P&L scaled to $25 per trade
 ./run.sh health              # quick pulse check
