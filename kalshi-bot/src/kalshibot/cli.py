@@ -14,6 +14,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 from .config import load_config, load_credentials
 from .logging_setup import setup_logging
@@ -29,10 +30,37 @@ def _dao(cfg) -> Dao:
     return Dao(connect(cfg.db_path))
 
 
+def _check_credentials(creds) -> Optional[str]:
+    """Plain-English description of what's missing, or None if we're good."""
+    if not creds.api_key_id:
+        return ("Your Kalshi Key ID isn't set yet.\n\n"
+                "  1. Create a key at kalshi.com -> Account -> Profile -> API Keys\n"
+                "  2. Run:  open -e .env\n"
+                "  3. Set   KALSHI_API_KEY_ID=<the Key ID Kalshi showed you>   and save.")
+    if not creds.private_key_path:
+        return ("KALSHI_PRIVATE_KEY_PATH isn't set in your .env file.\n"
+                "Set it to:  ./secrets/kalshi_private_key.pem")
+    if not Path(creds.private_key_path).exists():
+        return (f"Can't find your private key file at: {creds.private_key_path}\n\n"
+                "Kalshi lets you download that file once, when you create the API key.\n"
+                "Save it into the 'secrets' folder and name it exactly:\n"
+                "  kalshi_private_key.pem\n\n"
+                "If you saved it elsewhere, point KALSHI_PRIVATE_KEY_PATH in .env at it.")
+    return None
+
+
 def cmd_run(args) -> int:
     from .runtime.main import TradingSystem  # imported here so `report`/`health` need no creds
     cfg = load_config(args.config)
     creds = load_credentials()
+
+    problem = _check_credentials(creds)
+    if problem:
+        print("\nCan't start collecting yet.\n", file=sys.stderr)
+        print(problem, file=sys.stderr)
+        print("\nThen run  ./run.sh run  again.\n", file=sys.stderr)
+        return 1
+
     logger = setup_logging(cfg.logging.get("dir", "./logs"),
                            cfg.logging.get("level", "INFO"),
                            int(cfg.logging.get("max_bytes", 10_485_760)),
@@ -104,7 +132,13 @@ def main(argv=None) -> int:
         p.set_defaults(func=fn)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except FileNotFoundError as e:
+        # Most commonly a missing config -- say so plainly instead of a traceback.
+        print(f"\n{e}\n", file=sys.stderr)
+        print("If you haven't set up yet, run:  ./setup.sh\n", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

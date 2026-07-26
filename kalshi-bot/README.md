@@ -94,26 +94,37 @@ of scope for Phase 1.
 
 ```sh
 cd kalshi-bot
-python3 -m pip install -r requirements.txt
-
-python3 -m kalshibot.cli init            # writes config/config.yaml from the example
-cp .env.example .env                      # then edit .env with your key id + key path
-# edit config/config.yaml: pick cities, confirm each NWS station, set risk limits
+./setup.sh
 ```
+
+That one command checks your Python version, installs everything into a private
+`.venv` (which also avoids the usual macOS "externally managed environment" pip
+error), and creates `config/config.yaml` and `.env`. It never overwrites files
+you've already edited, so it's safe to re-run.
+
+Then the two things only you can do:
+
+1. Create a Kalshi API key (kalshi.com → Account → Profile → API Keys) and save
+   the downloaded private-key file as `secrets/kalshi_private_key.pem`.
+2. `open -e .env` and set `KALSHI_API_KEY_ID` to your Key ID.
 
 Run it (data collection + paper decisions; no live orders unless you enable them):
 
 ```sh
-PYTHONPATH=src python3 -m kalshibot.cli run
+./run.sh run
 ```
+
+`run.sh` is a thin wrapper so you never think about `PYTHONPATH` or virtualenvs.
+If credentials are missing it tells you exactly what to fix, in plain language,
+instead of raising a traceback.
 
 Other commands:
 
 ```sh
-PYTHONPATH=src python3 -m kalshibot.cli report            # the validation report
-PYTHONPATH=src python3 -m kalshibot.cli report --stake 25 # scale the trade-ledger P&L to $25/trade
-PYTHONPATH=src python3 -m kalshibot.cli health          # JSON health snapshot
-PYTHONPATH=src python3 -m kalshibot.cli reset-breaker   # clear a tripped loss breaker (manual)
+./run.sh report              # validation report + per-trade ledger
+./run.sh report --stake 25   # same, with P&L scaled to $25 per trade
+./run.sh health              # quick pulse check
+./run.sh reset-breaker       # clear a tripped daily-loss breaker (manual)
 ```
 
 To stop live orders instantly without touching the process: `touch ./HALT`
