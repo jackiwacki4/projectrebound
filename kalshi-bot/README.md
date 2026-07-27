@@ -229,15 +229,21 @@ Follow the build's own logic: **collect data first, decide later.**
 
 ## Running 24/7 on a MacBook
 
-A `launchd` agent is provided at
-`launchd/com.projectrebound.kalshibot.plist` — it auto-starts on login and
-restarts on crash. Edit the paths inside it, then:
-
 ```sh
-cp launchd/com.projectrebound.kalshibot.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.projectrebound.kalshibot.plist
-launchctl start com.projectrebound.kalshibot
+./install-autostart.sh              # install and start
+./install-autostart.sh --dry-run    # print what it would write, change nothing
+./install-autostart.sh --uninstall  # stop and remove
 ```
+
+That installs one `launchd` agent per config file present (weather, sports),
+each with its own label and its own log files, filling in absolute paths from
+the checkout so there is nothing to hand-edit. It refuses to install while a
+collector is running in a Terminal — two collectors on one database would poll
+and write everything twice — and it stops its own agents first, so re-running it
+after a `git pull` is the supported way to pick up new code.
+
+A hand-editable template is still at `launchd/com.projectrebound.kalshibot.plist`
+if you would rather wire it up yourself.
 
 The plist wraps the process in `caffeinate -s`, which keeps the Mac awake while
 **on power** so sleep doesn't interrupt collection. Tradeoff: on battery this

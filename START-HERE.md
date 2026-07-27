@@ -131,6 +131,39 @@ Look for these three lines near the top:
 The scoring sections stay empty until games finish and markets settle. That's
 normal — it has nothing to score yet.
 
+## Step 8 — Make it survive a closed window (recommended)
+
+Right now the bot only runs while that Terminal window stays open. Closing it,
+or restarting your Mac, stops collecting. To make it start on login and restart
+itself if it crashes:
+
+1. Press `Control` + `C` in **every** window where you started a bot.
+2. Paste:
+```sh
+cd ~/projectrebound/kalshi-bot && ./install-autostart.sh
+```
+
+It fills in all the paths itself — there is nothing to edit. It installs one
+background job per config file you have, prints what it started, and tells you
+where the logs are. You can then close the window.
+
+To check on it later, the same report command from Step 7 works. To see whether
+the background jobs are alive:
+
+```sh
+launchctl list | grep projectrebound
+```
+
+To undo it completely (data and config untouched):
+
+```sh
+cd ~/projectrebound/kalshi-bot && ./install-autostart.sh --uninstall
+```
+
+One tradeoff worth knowing: the background job wraps the bot in `caffeinate -s`,
+which keeps the Mac awake **while it is plugged in** so sleep doesn't interrupt
+collection. On battery it will not fight sleep, to avoid draining it.
+
 ---
 
 ## How to stop it
