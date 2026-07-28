@@ -34,13 +34,33 @@ FORECAST_HORIZON_DAYS = 7
 
 
 class MarketCollector:
-    def __init__(self, dao: Dao, client: KalshiClient, logger: logging.Logger) -> None:
+    # Only the top few price levels are kept. The model reads best bid and best
+    # ask; the rest was stored "for research" and cost ~2.4 KB per snapshot,
+    # which at 60s across ~136 markets came to ~240 MB/day (measured on a live
+    # database after two days). Ten levels a side is far more depth than any
+    # 1-contract decision needs and still shows the shape of the queue for
+    # later liquidity analysis. Set to 0 in config to keep everything.
+    DEFAULT_DEPTH_LEVELS = 10
+
+    # Markets that never settle -- a rained-out game rescheduled past the
+    # window, a voided market -- would otherwise be re-polled every five
+    # minutes forever, one request each, for the life of the database.
+    SETTLEMENT_LOOKBACK_DAYS = 30
+
+    def __init__(self, dao: Dao, client: KalshiClient, logger: logging.Logger,
+                 depth_levels: Optional[int] = None) -> None:
         self._dao = dao
         self._client = client
         self._log = logger
+        self._depth = (self.DEFAULT_DEPTH_LEVELS if depth_levels is None
+                       else int(depth_levels))
+
+    def _trim(self, levels: list) -> list:
+        """Keep the best N price levels (they arrive best-first)."""
+        return levels if self._depth <= 0 else levels[:self._depth]
 
     def poll_books(self, series_list: list[str]) -> int:
-        """Snapshot the full order book for every open market in the families."""
+        """Snapshot the order book for every open market in the families."""
         snapshots = 0
         for series in series_list:
             markets = self._client.list_markets(series_ticker=series, status="open")
@@ -56,7 +76,8 @@ class MarketCollector:
                 try:
                     ob = self._client.get_orderbook(ticker)
                     self._dao.insert_book_snapshot(ticker, ob.captured_ts,
-                                                   ob.yes_levels, ob.no_levels)
+                                                   self._trim(ob.yes_levels),
+                                                   self._trim(ob.no_levels))
                     snapshots += 1
                 except Exception as e:  # one bad market must not stop the sweep
                     log(self._log, logging.WARNING, "orderbook fetch failed",
@@ -90,8 +111,12 @@ class MarketCollector:
 
     def poll_settlements(self) -> int:
         """Record settlement results for markets that have resolved."""
+        cutoff = now_ms() - self.SETTLEMENT_LOOKBACK_DAYS * 86_400_000
         rows = self._dao.conn.execute(
-            "SELECT ticker FROM markets WHERE ticker NOT IN (SELECT ticker FROM settlements)"
+            "SELECT ticker FROM markets "
+            "WHERE ticker NOT IN (SELECT ticker FROM settlements) "
+            "  AND (close_ts IS NULL OR close_ts >= ?)",
+            (cutoff,),
         ).fetchall()
         recorded = 0
         for row in rows:

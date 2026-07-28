@@ -1,6 +1,7 @@
 """Command-line entrypoint.
 
     kalshibot check            preflight: credentials, Kalshi, markets, data feed
+    kalshibot sweep            test other thresholds against data already collected
     kalshibot run              start the 24/7 collection + decision loop
     kalshibot report           print the Phase 1 validation report
     kalshibot health           print a health snapshot (JSON)
@@ -183,6 +184,13 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_sweep(args) -> int:
+    from .reporting.sweep import generate_sweep
+    cfg = load_config(args.config)
+    print(generate_sweep(_dao(cfg), stake_dollars=args.stake))
+    return 0
+
+
 def cmd_health(args) -> int:
     cfg = load_config(args.config)
     dao = _dao(cfg)
@@ -226,11 +234,11 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name, fn in [
         ("run", cmd_run), ("check", cmd_check), ("report", cmd_report),
-        ("health", cmd_health), ("reset-breaker", cmd_reset_breaker),
-        ("init", cmd_init),
+        ("sweep", cmd_sweep), ("health", cmd_health),
+        ("reset-breaker", cmd_reset_breaker), ("init", cmd_init),
     ]:
         p = sub.add_parser(name, parents=[common])
-        if name == "report":
+        if name in ("report", "sweep"):
             p.add_argument("--stake", type=float, default=10.0,
                            help="dollars deployed per trade for the scaled P&L column (default 10)")
         p.set_defaults(func=fn)

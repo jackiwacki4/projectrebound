@@ -299,7 +299,7 @@ def _strategy_section(conn, lines: list[str], stake_cents: int,
         """
         SELECT d.ticker, d.intended_side AS side, d.intended_price_cents AS price,
                MIN(d.decision_ts) AS entry_ts, d.edge_after_fees AS edge,
-               s.result AS result
+               d.spread_cents AS spread, s.result AS result
         FROM decisions d
         JOIN settlements s ON s.ticker = d.ticker
         WHERE d.gate_passed = 1 AND d.intended_side IS NOT NULL
@@ -336,6 +336,12 @@ def _strategy_section(conn, lines: list[str], stake_cents: int,
                  f"({settled_markets - n} never cleared the gates)")
     lines.append(f"  win rate        : {100*wins/n:.1f}%  ({wins}/{n})")
     lines.append(f"  average entry   : {avg_price:.0f}c, claimed edge {avg_edge:+.3f}/contract")
+    spreads = [r["spread"] for r in rows if r["spread"] is not None]
+    if spreads:
+        avg_spread = sum(spreads) / len(spreads)
+        lines.append(f"  average spread  : {avg_spread:.1f}c at entry"
+                     + ("   <-- wider than the edge claimed above"
+                        if avg_spread / 100 > avg_edge else ""))
     lines.append(f"  {'P&L at 1 each':<16}: {_fmt_usd(total_1c)}")
     lines.append(f"  {f'P&L at ${stake_dollars:.0f} each':<16}: {_fmt_usd(total_scaled)}")
     if n < MIN_SAMPLE:
@@ -397,6 +403,17 @@ def _edge_section(conn, lines: list[str]) -> None:
     edges = sorted(float(r["edge_after_fees"]) for r in rows)
     lines.append(f"  n={len(edges)}  min={edges[0]:+.3f}  "
                  f"median={edges[len(edges)//2]:+.3f}  max={edges[-1]:+.3f}")
+    # Edge is computed at the ask, so it is already net of the spread -- but
+    # seeing the two side by side is what tells you whether the "edge" was a
+    # disagreement with the market or just a wide quote.
+    sp = conn.execute(
+        "SELECT spread_cents FROM decisions WHERE spread_cents IS NOT NULL"
+    ).fetchall()
+    if sp:
+        vals = sorted(r["spread_cents"] for r in sp)
+        wide = sum(1 for v in vals if v > 5)
+        lines.append(f"  spread at those decisions: median {vals[len(vals)//2]}c, "
+                     f"{100*wide/len(vals):.0f}% wider than 5c")
     lines.append("")
 
 

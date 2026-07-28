@@ -42,7 +42,9 @@ class TradingSystem:
         self.client = KalshiClient(creds)
         self.family = build_family(config, self.dao, self.client, logger)
         logger.info(self.family.describe())
-        self.market_collector = MarketCollector(self.dao, self.client, logger)
+        self.market_collector = MarketCollector(
+            self.dao, self.client, logger,
+            depth_levels=config.collection.get("book_depth_levels"))
         self.paper = PaperEngine(self.dao)
         self.live = LiveEngine(self.dao, self.client)
         self.model = self.family.model
@@ -62,12 +64,15 @@ class TradingSystem:
     def run(self) -> None:
         col = self.cfg.collection
         book_period = int(col.get("book_poll_seconds", 60))
+        # Trades are recorded for later research; no model reads them. Polling
+        # them at book cadence doubled the Kalshi request rate for nothing.
+        trade_period = int(col.get("trade_poll_seconds", 300))
         settle_period = int(col.get("settlement_poll_seconds", 300))
         data_tasks = self.family.data_tasks()
         tick = min([book_period, int(col.get("book_poll_seconds_near_settlement", 15))]
                    + [t.period_seconds for t in data_tasks])
 
-        next_book = next_settle = 0.0
+        next_book = next_trade = next_settle = 0.0
         next_data = {t.name: 0.0 for t in data_tasks}
         log(self.log, logging.INFO, "trading system starting",
             live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family)
@@ -91,9 +96,11 @@ class TradingSystem:
                     if now >= next_data[task.name]:
                         self._safe(task.fn, label=task.name)
                         next_data[task.name] = now + task.period_seconds
+                if now >= next_trade:
+                    self._safe(self.market_collector.poll_trades, self.series_list)
+                    next_trade = now + trade_period
                 if now >= next_book:
                     ok = self._safe(self.market_collector.poll_books, self.series_list)
-                    self._safe(self.market_collector.poll_trades, self.series_list)
                     if ok is not None:
                         self.stale.mark_fresh()   # a clean sweep = fresh state
                         self._decision_cycle()
@@ -171,6 +178,7 @@ class TradingSystem:
             best_yes_bid=book.best_yes_bid, best_yes_ask=book.best_yes_ask,
             intended_side=intent.side, intended_price_cents=intent.limit_price_cents,
             edge_after_fees=intent.edge_after_fees,
+            spread_cents=intent.spread_cents, depth_at_price=intent.depth_at_price,
             gate_passed=gate.passed, blocked_by=gate.blocked_by,
         )
         # Paper path: always recorded, regardless of the gates. The gates

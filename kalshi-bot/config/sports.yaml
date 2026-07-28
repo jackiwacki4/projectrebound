@@ -58,6 +58,12 @@ sports:
 
 collection:
   book_poll_seconds: 60
+  # Trades are stored for later research; no model reads them. Polling them at
+  # book cadence doubled the Kalshi request rate for no benefit.
+  trade_poll_seconds: 300
+  # Price levels kept per side of the book. The model uses best bid/ask; full
+  # depth cost ~240 MB/day. 0 keeps everything.
+  book_depth_levels: 10
   book_poll_seconds_near_settlement: 15
   near_settlement_minutes: 120
   settlement_poll_seconds: 300
@@ -65,6 +71,14 @@ collection:
 # These BLOCK real orders. Paper records are always written.
 risk:
   min_edge_after_fees: 0.05
+  # Refuse to cross a book wider than this. Edge is computed at the ask, so a
+  # wide quote manufactures apparent edge: on a market quoted 54/61 you are 3.5c
+  # behind fair before the model has been right about anything.
+  # Measured across 95 live MLB books (2026-07): within 48h of first pitch the
+  # median spread was 1c and nothing exceeded 3c; beyond 48h the median was 5c.
+  # So 3 admits every liquid market and excludes the far-dated ones nobody is
+  # trading yet. Comment out to disable the gate entirely.
+  max_spread_cents: 3
   price_band_reject_low: 0.40
   price_band_reject_high: 0.60
   max_open_markets: 3

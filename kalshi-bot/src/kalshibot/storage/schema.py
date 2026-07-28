@@ -9,7 +9,7 @@ Design rules:
   are immutable once written. Storage is cheap; lost history is unrecoverable.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -175,6 +175,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     intended_side     TEXT,            -- yes | no
     intended_price_cents INTEGER,
     edge_after_fees   REAL,
+    -- The cost of crossing, recorded with every decision. Without it there is
+    -- no way to tell edge from spread after the fact: a 5c "edge" on a market
+    -- quoted 54/61 is mostly just the 7c you pay to get in.
+    spread_cents      INTEGER,        -- best ask - best bid, same both sides
+    depth_at_price    INTEGER,        -- contracts resting at the price we'd pay
     gate_passed       INTEGER NOT NULL, -- 1 if all gates passed
     blocked_by        TEXT              -- gate name, or NULL
 );

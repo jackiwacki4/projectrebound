@@ -205,6 +205,7 @@ Other commands:
 
 ```sh
 ./run.sh check               # preflight: credentials, Kalshi, markets, data feed
+./run.sh sweep               # test other thresholds against data already collected
 ./run.sh report              # validation report + per-trade ledger
 ./run.sh report --stake 25   # same, with P&L scaled to $25 per trade
 ./run.sh health              # quick pulse check
@@ -213,6 +214,49 @@ Other commands:
 
 To stop live orders instantly without touching the process: `touch ./HALT`
 (the kill-switch file; delete it to resume). Data collection keeps running.
+
+## What the market actually looks like (measured, 2026-07)
+
+Two numbers worth knowing before tuning anything, both from live Kalshi books:
+
+**Spreads depend entirely on how far out the game is.** Across 95 open MLB
+markets, by time to first pitch:
+
+| time to first pitch | n | median spread | wider than 3c |
+|---|---|---|---|
+| in progress / <3h | 29 | 1c | 0% |
+| 12–48h | 44 | 1c | 0% |
+| >48h out | 22 | 5c | 55% |
+
+The liquid window is *tight*. That cuts both ways: there is no fat spread to
+collect by making markets, and no spread-driven illusion of edge either — but
+the far-dated books are wide enough to manufacture one, which is what
+`risk.max_spread_cents` (default 3) keeps the bot out of.
+
+**The model is calibrated but not sharp.** Over the first 52 settled markets the
+sports model's predictions tracked outcomes well at the extremes (predicted 3%
+happened 5%; predicted 97% happened 95%) while its Brier score sat at 0.25 —
+i.e. it agrees with the market rather than beating it. Its one visible edge over
+itself is late: Brier drops to 0.17 inside the last two hours, which is the
+live-score clamp doing its job. Whether that beats the *market's* in-game price
+is a different question, and the one the strategy section answers.
+
+## Choosing thresholds without waiting: `sweep`
+
+```sh
+./run.sh sweep --config config/sports.yaml
+```
+
+Every decision is stored with its probability, price, spread and eventual
+outcome, so "what would a 3c minimum edge and a 3c spread cap have done?" is a
+query rather than another week of collecting. The sweep re-decides which
+recorded candidates a different threshold would have taken, one entry per market,
+and scores them.
+
+It sweeps the *gates*, not the model — and it splits the history in half by date
+and shows both, because the best cell of a table fitted on the same data is not
+a discovery. A setting that only works in one half is noise, and the output says
+so.
 
 ## The intended order of operations
 

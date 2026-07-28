@@ -419,17 +419,21 @@ class Dao:
                         book_snapshot_id: Optional[int], best_yes_bid: Optional[int],
                         best_yes_ask: Optional[int], intended_side: Optional[str],
                         intended_price_cents: Optional[int], edge_after_fees: Optional[float],
-                        gate_passed: bool, blocked_by: Optional[str]) -> int:
+                        gate_passed: bool, blocked_by: Optional[str],
+                        spread_cents: Optional[int] = None,
+                        depth_at_price: Optional[int] = None) -> int:
         cur = self.conn.execute(
             """
             INSERT INTO decisions(decision_ts, ticker, model_name, probability, uncertainty,
                 inputs, book_snapshot_id, best_yes_bid, best_yes_ask, intended_side,
-                intended_price_cents, edge_after_fees, gate_passed, blocked_by)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                intended_price_cents, edge_after_fees, spread_cents, depth_at_price,
+                gate_passed, blocked_by)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (decision_ts, ticker, model_name, probability, uncertainty, json.dumps(inputs),
              book_snapshot_id, best_yes_bid, best_yes_ask, intended_side,
-             intended_price_cents, edge_after_fees, 1 if gate_passed else 0, blocked_by),
+             intended_price_cents, edge_after_fees, spread_cents, depth_at_price,
+             1 if gate_passed else 0, blocked_by),
         )
         return cur.lastrowid
 
