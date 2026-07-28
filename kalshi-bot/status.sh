@@ -16,6 +16,38 @@ PY="$ROOT/.venv/bin/python"
 FAMILIES=("sports:config/sports.yaml" "weather:config/config.yaml")
 WANTED="${1:-}"
 
+# Which collector is running which family? They are the same program, so the
+# only thing that distinguishes them is the --config argument on the command
+# line -- and a collector started as plain `./run.sh run` has NO such argument
+# and is running the DEFAULT config. Matching on the config path alone reported
+# exactly that case as "not running" while its data was seconds old.
+DEFAULT_CONFIG="config/config.yaml"
+
+collector_pids() {   # $1 = config path for this family
+  local found=""
+  local pid cmd cfg
+  for pid in $(pgrep -f "kalshibot.cli run" 2>/dev/null); do
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = "$PPID" ] && continue
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+    case "$cmd" in
+      *kalshibot.cli*run*) ;;
+      *) continue ;;
+    esac
+    case "$cmd" in
+      *--config*)
+        cfg="${cmd##*--config }"
+        cfg="${cfg%% *}"
+        [ "$(basename "$cfg")" = "$(basename "$1")" ] && found="$found $pid"
+        ;;
+      *)  # no --config: it is running the default
+        [ "$1" = "$DEFAULT_CONFIG" ] && found="$found $pid"
+        ;;
+    esac
+  done
+  echo "${found# }"
+}
+
 # How long has this database actually been collecting, and is it still? Two days
 # of uptime and two days of DATA are different claims -- a collector that died
 # after an hour still looks "installed", and only the span shows it.
@@ -45,7 +77,13 @@ size_mb = db.stat().st_size / 1_048_576
 print(f"    collecting  : {hours:.1f} hours of price history, {row['n']:,} snapshots")
 print(f"    last update : {mins_ago:.0f} minutes ago" +
       ("   <-- STALE, the collector may have stopped" if mins_ago > 10 else ""))
-print(f"    database    : {db}  ({size_mb:.1f} MB)")
+# Full-depth order books every 60s add up fast. Say so in months, not bytes,
+# while there is still time to do something about it.
+per_day = size_mb / max(hours / 24, 1e-9)
+print(f"    database    : {db}  ({size_mb:.1f} MB, growing ~{per_day:.0f} MB/day"
+      f" = ~{per_day * 30 / 1024:.1f} GB/month)")
+if per_day * 30 / 1024 > 3:
+    print("                  ^ worth watching: this will fill a laptop in months")
 PY
 }
 
@@ -61,9 +99,7 @@ for entry in "${FAMILIES[@]}"; do
   echo "  $(echo "$family" | tr '[:lower:]' '[:upper:]')  ($config)"
   echo "================================================================"
 
-  # The config path appears in the collector's command line, which is what tells
-  # the two families apart -- they are the same program otherwise.
-  pids="$(pgrep -f "kalshibot.cli run.*$config" 2>/dev/null | tr '\n' ' ')"
+  pids="$(collector_pids "$config")"
   if [ -n "${pids// /}" ]; then
     echo "    running     : YES (pid ${pids% })"
   else

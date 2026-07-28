@@ -97,6 +97,7 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     lines.append("")
 
     _activity_section(conn, lines)
+    _strategy_section(conn, lines, stake_cents, stake_dollars)
     _calibration_section(conn, lines)
     _accuracy_by_time_to_settlement(conn, lines)
     _edge_section(conn, lines)
@@ -235,9 +236,13 @@ def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
         """
     ).fetchall()
 
-    lines.append(f"-- Trade ledger (paper) -- entry, settlement, P&L @ ${stake_dollars:.0f}/trade --")
+    lines.append("-- Every candidate considered (NOT a strategy -- see above) --")
+    lines.append("   One row per market per polling cycle, gates ignored, negative-edge")
+    lines.append("   candidates included. Buying the same market 900 times pays the fee")
+    lines.append("   900 times on one outcome, so these totals are guaranteed to look")
+    lines.append("   terrible and mean nothing. Use the strategy section above.")
     if not all_rows:
-        lines.append("  (no settled paper trades yet)")
+        lines.append("  (no settled paper records yet)")
         lines.append("")
         return
 
@@ -252,23 +257,89 @@ def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
             wins += 1
 
     n = len(all_rows)
-    lines.append(f"  date        ticker                 side  buy   settled   P&L(1)   P&L(${stake_dollars:.0f})")
+    lines.append(f"  date        ticker                            side  buy   settled   P&L(1)   P&L(${stake_dollars:.0f})")
     for r in all_rows[:ledger_rows]:
         won = _won(r["side"], r["result"])
         settled = "WON $1.00" if won else "LOST $.00"
         pnl1 = _pnl_cents(r["side"], r["price_cents"], r["fee_cents"], 1, r["result"])
         contracts, pnls = _scaled_pnl_cents(r["side"], r["price_cents"], r["result"], stake_cents)
         when = datetime.fromtimestamp(r["filled_ts"] / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
-        tick = (r["ticker"] or "")[:20]
-        lines.append(f"  {when}  {tick:<20}  {r['side']:<4}  {r['price_cents']:>2}c  "
+        tick = (r["ticker"] or "")[:31]
+        lines.append(f"  {when}  {tick:<31}  {r['side']:<4}  {r['price_cents']:>2}c  "
                      f"{settled:<9}  {_fmt_usd(pnl1):>6}  {_fmt_usd(pnls):>8}")
     if n > ledger_rows:
         lines.append(f"  ... and {n - ledger_rows} older trades (full history in the database)")
     lines.append("")
-    lines.append(f"  TOTALS over {n} settled trades:  win rate {100*wins/n:.1f}%")
-    lines.append(f"    at 1 contract/trade : {_fmt_usd(total_1c)}")
-    lines.append(f"    at ${stake_dollars:.0f}/trade      : {_fmt_usd(total_stake)}   "
-                 f"(hypothetical -- assumes full fills at the shown price)")
+    lines.append(f"  Totals over {n} candidate records:  win rate {100*wins/n:.1f}%")
+    lines.append(f"    at 1 contract each : {_fmt_usd(total_1c)}")
+    lines.append(f"    at ${stake_dollars:.0f} each        : {_fmt_usd(total_stake)}")
+    lines.append("    ^ NOT a strategy result. See the strategy section above.")
+    lines.append("")
+
+
+def _strategy_section(conn, lines: list[str], stake_cents: int,
+                      stake_dollars: float) -> None:
+    """What a strategy someone would actually run produced: ONE entry per
+    market, taken only when every risk gate passed, held to settlement.
+
+    This exists because the paper ledger below is not a strategy and cannot be
+    read as one. `decide()` has no minimum-edge filter -- it returns the better
+    of the two sides even when the expected value is negative -- and the paper
+    record is written for every candidate on every polling cycle regardless of
+    the gates, because it is research data about the model, not a trade log. So
+    the paper totals describe buying every market every minute with the risk
+    limits switched off, which nobody would do and which loses money by
+    construction: the fee is paid hundreds of times on one outcome.
+
+    The number below is the honest one. It is still optimistic (it assumes the
+    displayed price was there for the taking), and the paper-vs-live divergence
+    section is what eventually measures that.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.ticker, d.intended_side AS side, d.intended_price_cents AS price,
+               MIN(d.decision_ts) AS entry_ts, d.edge_after_fees AS edge,
+               s.result AS result
+        FROM decisions d
+        JOIN settlements s ON s.ticker = d.ticker
+        WHERE d.gate_passed = 1 AND d.intended_side IS NOT NULL
+          AND d.intended_price_cents IS NOT NULL
+        GROUP BY d.ticker
+        """
+    ).fetchall()
+    settled_markets = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker = d.ticker"
+    ).fetchone()["c"]
+
+    lines.append("-- Strategy: one entry per market, gates enforced (THE number) --")
+    if not rows:
+        lines.append(f"  No market cleared every risk gate, out of {settled_markets} settled.")
+        lines.append("  That is the gates working, not a failure: with no edge above the")
+        lines.append("  minimum, the correct number of trades is zero.")
+        lines.append("")
+        return
+
+    total_1c = total_scaled = wins = 0
+    for r in rows:
+        fee = taker_fee_cents(r["price"], 1)
+        total_1c += _pnl_cents(r["side"], r["price"], fee, 1, r["result"])
+        _, scaled = _scaled_pnl_cents(r["side"], r["price"], r["result"], stake_cents)
+        total_scaled += scaled
+        if _won(r["side"], r["result"]):
+            wins += 1
+
+    n = len(rows)
+    avg_price = sum(r["price"] for r in rows) / n
+    avg_edge = sum(float(r["edge"] or 0) for r in rows) / n
+    lines.append(f"  markets entered : {n} of {settled_markets} settled "
+                 f"({settled_markets - n} never cleared the gates)")
+    lines.append(f"  win rate        : {100*wins/n:.1f}%  ({wins}/{n})")
+    lines.append(f"  average entry   : {avg_price:.0f}c, claimed edge {avg_edge:+.3f}/contract")
+    lines.append(f"  {'P&L at 1 each':<16}: {_fmt_usd(total_1c)}")
+    lines.append(f"  {f'P&L at ${stake_dollars:.0f} each':<16}: {_fmt_usd(total_scaled)}")
+    if n < MIN_SAMPLE:
+        lines.append(f"  ({n} markets is far too few to conclude anything either way.)")
     lines.append("")
 
 
@@ -342,8 +413,8 @@ def _pnl_section(conn, lines: list[str]) -> None:
                     for r in paper)
         fees = sum(r["fee_cents"] for r in paper)
         gross = total + fees
-        lines.append(f"  Paper: {len(paper)} settled fills, net {total/100:+.2f} USD, "
-                     f"fees {fees/100:.2f} USD")
+        lines.append(f"  Paper: {len(paper)} settled candidate records (not trades), "
+                     f"net {total/100:+.2f} USD, fees {fees/100:.2f} USD")
         if gross != 0:
             lines.append(f"  Fee drag (paper): {100*fees/abs(gross):.1f}% of gross P&L")
     else:
