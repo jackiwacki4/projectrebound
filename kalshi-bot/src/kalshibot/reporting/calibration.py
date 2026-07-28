@@ -59,7 +59,8 @@ def _hours(ms: int) -> float:
 @dataclass
 class Report:
     text: str
-    resolved_count: int
+    resolved_count: int      # decision rows whose market has settled
+    market_count: int = 0    # DISTINCT settled markets behind those rows
 
 
 def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25) -> Report:
@@ -70,16 +71,29 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     resolved = conn.execute(
         "SELECT COUNT(*) AS c FROM decisions d JOIN settlements s ON s.ticker=d.ticker"
     ).fetchone()["c"]
+    # The number that actually governs how much can be concluded. A decision row
+    # is written every polling cycle, so ONE market that stayed tradable for six
+    # hours contributes ~360 rows that are all the same bet on the same outcome.
+    # Counting those as 360 samples would clear the minimum-sample bar on a
+    # single day of collection and make a coin flip look like evidence.
+    markets = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker=d.ticker"
+    ).fetchone()["c"]
 
     lines.append("=" * 68)
     lines.append("projectrebound Phase 1 -- validation report")
     lines.append("=" * 68)
-    lines.append(f"Resolved decisions (sample size): {resolved}")
-    if resolved < MIN_SAMPLE:
+    lines.append(f"Settled markets (the real sample size): {markets}")
+    lines.append(f"Decision rows behind them:             {resolved}"
+                 + (f"   (~{resolved // markets} polls per market)" if markets else ""))
+    if markets < MIN_SAMPLE:
         lines.append("")
-        lines.append(f"** SAMPLE TOO SMALL ({resolved} < {MIN_SAMPLE}). **")
+        lines.append(f"** SAMPLE TOO SMALL ({markets} settled markets < {MIN_SAMPLE}). **")
         lines.append("** Numbers below are shown for wiring/sanity only and must NOT be")
         lines.append("** read as evidence of edge or its absence. Keep collecting.")
+        lines.append("** Note the row count above is NOT the sample size: the same market")
+        lines.append("** re-priced every minute is one outcome, not hundreds.")
     lines.append("")
 
     _activity_section(conn, lines)
@@ -90,7 +104,7 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     _trade_ledger_section(conn, lines, stake_cents, stake_dollars, ledger_rows)
     _divergence_section(conn, lines)
 
-    return Report(text="\n".join(lines), resolved_count=resolved)
+    return Report(text="\n".join(lines), resolved_count=resolved, market_count=markets)
 
 
 def _activity_section(conn, lines: list[str]) -> None:
@@ -266,6 +280,8 @@ def _calibration_section(conn, lines: list[str]) -> None:
         """
     ).fetchall()
     lines.append("-- Calibration (model P(YES) vs observed YES frequency) --")
+    lines.append("   (n counts decision rows, not games: a market priced every minute")
+    lines.append("    for hours appears many times, so treat n as weight, not sample size)")
     if not rows:
         lines.append("  (no resolved decisions yet)")
         lines.append("")
