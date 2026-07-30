@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..models.base import Market, Prediction
+from ..models.base import MarketBase, Prediction
 from ..storage.dao import BookRow
 from .fees import taker_fee_cents
 from .intent import OrderIntent
@@ -24,7 +24,7 @@ def _ev_dollars(win_prob: float, price_cents: Optional[int]) -> Optional[float]:
     return win_prob * 1.0 - price_cents / 100.0 - fee
 
 
-def decide(market: Market, prediction: Prediction, book: BookRow,
+def decide(market: MarketBase, prediction: Prediction, book: BookRow,
            decision_ts: int) -> Optional[OrderIntent]:
     """Pick the better side (YES vs NO) by fee-adjusted EV, or None if neither
     side is tradable from the current book."""
@@ -42,6 +42,20 @@ def decide(market: Market, prediction: Prediction, book: BookRow,
         return None
 
     side, price, ev, win_prob = max(candidates, key=lambda c: c[2])
+
+    # The spread is the same number from either side: the YES ask is
+    # 100 - best NO bid, so (yes_ask - yes_bid) == (no_ask - no_bid).
+    spread = None
+    if book.best_yes_ask is not None and book.best_yes_bid is not None:
+        spread = book.best_yes_ask - book.best_yes_bid
+    # Buying YES lifts the resting NO bids, and vice versa -- so the size we
+    # could actually get is on the OTHER side's book.
+    other = book.no_levels if side == "yes" else book.yes_levels
+    depth = None
+    if other and price is not None:
+        want = 100 - price
+        depth = sum(c for p, c in other if p >= want)
+
     return OrderIntent(
         ticker=market.ticker,
         side=side,
@@ -51,4 +65,6 @@ def decide(market: Market, prediction: Prediction, book: BookRow,
         decision_ts=decision_ts,
         inputs=prediction.inputs,
         uncertainty=prediction.uncertainty,
+        spread_cents=spread,
+        depth_at_price=depth,
     )

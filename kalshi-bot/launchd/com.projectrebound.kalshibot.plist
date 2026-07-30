@@ -3,8 +3,10 @@
   launchd agent to run the collector 24/7 and restart it on crash.
 
   Install (see README for the full walkthrough):
-    1. Edit the paths below: replace /Users/YOU/kalshi-bot with your real path
-       and confirm the python3 path (`which python3`).
+    1. Edit the paths below: replace /Users/YOU/projectrebound/kalshi-bot with
+       your real path (run `pwd` inside the kalshi-bot folder to see it).
+       To run the SPORTS family instead, point --config at config/sports.yaml
+       and give this file a different Label, so the two can run side by side.
     2. cp launchd/com.projectrebound.kalshibot.plist ~/Library/LaunchAgents/
     3. launchctl load ~/Library/LaunchAgents/com.projectrebound.kalshibot.plist
     4. launchctl start com.projectrebound.kalshibot
@@ -22,22 +24,24 @@
     <array>
         <string>/usr/bin/caffeinate</string>
         <string>-s</string>
-        <string>/usr/bin/env</string>
-        <string>python3</string>
+        <!-- The .venv interpreter, NOT the system python3: setup.sh installs the
+             libraries into .venv, and `/usr/bin/env python3` would crash-loop
+             here on a missing PyYAML (KeepAlive restarts it every 30s forever). -->
+        <string>/Users/YOU/projectrebound/kalshi-bot/.venv/bin/python</string>
         <string>-m</string>
         <string>kalshibot.cli</string>
         <string>run</string>
         <string>--config</string>
-        <string>/Users/YOU/kalshi-bot/config/config.yaml</string>
+        <string>/Users/YOU/projectrebound/kalshi-bot/config/config.yaml</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/YOU/kalshi-bot</string>
+    <string>/Users/YOU/projectrebound/kalshi-bot</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
-        <string>/Users/YOU/kalshi-bot/src</string>
+        <string>/Users/YOU/projectrebound/kalshi-bot/src</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -46,9 +50,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/YOU/kalshi-bot/logs/launchd.out.log</string>
+    <string>/Users/YOU/projectrebound/kalshi-bot/logs/launchd.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOU/kalshi-bot/logs/launchd.err.log</string>
+    <string>/Users/YOU/projectrebound/kalshi-bot/logs/launchd.err.log</string>
 
     <!-- Give the process a moment between restarts rather than spinning. -->
     <key>ThrottleInterval</key>

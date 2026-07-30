@@ -59,10 +59,12 @@ def _hours(ms: int) -> float:
 @dataclass
 class Report:
     text: str
-    resolved_count: int
+    resolved_count: int      # decision rows whose market has settled
+    market_count: int = 0    # DISTINCT settled markets behind those rows
 
 
-def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25) -> Report:
+def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25,
+                    risk_cfg: Optional[dict] = None) -> Report:
     conn = dao.conn
     lines: list[str] = []
     stake_cents = int(round(stake_dollars * 100))
@@ -70,19 +72,33 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     resolved = conn.execute(
         "SELECT COUNT(*) AS c FROM decisions d JOIN settlements s ON s.ticker=d.ticker"
     ).fetchone()["c"]
+    # The number that actually governs how much can be concluded. A decision row
+    # is written every polling cycle, so ONE market that stayed tradable for six
+    # hours contributes ~360 rows that are all the same bet on the same outcome.
+    # Counting those as 360 samples would clear the minimum-sample bar on a
+    # single day of collection and make a coin flip look like evidence.
+    markets = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker=d.ticker"
+    ).fetchone()["c"]
 
     lines.append("=" * 68)
     lines.append("projectrebound Phase 1 -- validation report")
     lines.append("=" * 68)
-    lines.append(f"Resolved decisions (sample size): {resolved}")
-    if resolved < MIN_SAMPLE:
+    lines.append(f"Settled markets (the real sample size): {markets}")
+    lines.append(f"Decision rows behind them:             {resolved}"
+                 + (f"   (~{resolved // markets} polls per market)" if markets else ""))
+    if markets < MIN_SAMPLE:
         lines.append("")
-        lines.append(f"** SAMPLE TOO SMALL ({resolved} < {MIN_SAMPLE}). **")
+        lines.append(f"** SAMPLE TOO SMALL ({markets} settled markets < {MIN_SAMPLE}). **")
         lines.append("** Numbers below are shown for wiring/sanity only and must NOT be")
         lines.append("** read as evidence of edge or its absence. Keep collecting.")
+        lines.append("** Note the row count above is NOT the sample size: the same market")
+        lines.append("** re-priced every minute is one outcome, not hundreds.")
     lines.append("")
 
     _activity_section(conn, lines)
+    _strategy_section(dao, lines, stake_cents, stake_dollars, risk_cfg)
     _calibration_section(conn, lines)
     _accuracy_by_time_to_settlement(conn, lines)
     _edge_section(conn, lines)
@@ -90,7 +106,7 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     _trade_ledger_section(conn, lines, stake_cents, stake_dollars, ledger_rows)
     _divergence_section(conn, lines)
 
-    return Report(text="\n".join(lines), resolved_count=resolved)
+    return Report(text="\n".join(lines), resolved_count=resolved, market_count=markets)
 
 
 def _activity_section(conn, lines: list[str]) -> None:
@@ -112,13 +128,25 @@ def _activity_section(conn, lines: list[str]) -> None:
     forecasts = one("SELECT COUNT(*) FROM forecasts")
     providers = one("SELECT COUNT(DISTINCT provider) FROM forecasts")
     obs = one("SELECT COUNT(*) FROM observations")
+    ratings = one("SELECT COUNT(*) FROM sports_ratings")
+    rating_sources = one("SELECT COUNT(DISTINCT provider) FROM sports_ratings")
+    game_states = one("SELECT COUNT(*) FROM sports_game_states")
+    games = one("SELECT COUNT(*) FROM sports_games")
     markets = one("SELECT COUNT(*) FROM markets")
     settled = one("SELECT COUNT(*) FROM settlements")
     last_book = one("SELECT MAX(captured_ts) FROM book_snapshots")
+    model_inputs = forecasts + ratings
 
     lines.append("-- Activity (is it working?) --")
-    lines.append(f"  data collected : {books} book snapshots ({books_usable} with live quotes), "
-                 f"{forecasts} forecasts from {providers} sources, {obs} observations")
+    lines.append(f"  data collected : {books} book snapshots ({books_usable} with live quotes)")
+    # Only the running family's input lines are shown, so a weather report is
+    # not padded with four sports zeros (and vice versa).
+    if forecasts or not ratings:
+        lines.append(f"  weather inputs : {forecasts} forecasts from {providers} sources, "
+                     f"{obs} station observations")
+    if ratings or games:
+        lines.append(f"  sports inputs  : {ratings} ratings from {rating_sources} methods, "
+                     f"{game_states} game states, {games} games linked")
     lines.append(f"  markets tracked: {markets}   settled so far: {settled}")
     lines.append(f"  decisions made : {decisions}  (passed all risk gates: {passed})")
     lines.append(f"  paper trades   : {paper}  ({pending} awaiting settlement)")
@@ -149,8 +177,12 @@ def _activity_section(conn, lines: list[str]) -> None:
         elif books_usable == 0:
             lines.append("  >> Collecting, but no order book has carried a quote yet.")
             lines.append("     Can be normal for thin markets; re-check once trading is active.")
-        elif forecasts == 0:
-            lines.append("  >> Collecting prices but NO forecasts -- the weather sources are failing.")
+        elif model_inputs == 0:
+            lines.append("  >> Collecting prices but NO model inputs (forecasts / ratings) --")
+            lines.append("     the data sources are failing. Check the log for provider warnings.")
+        elif ratings and games == 0:
+            lines.append("  >> Ratings exist but no game is linked to a market. Usually a team-code")
+            lines.append("     mismatch -- see the 'no ESPN game matched' warnings in the log.")
         else:
             lines.append("  >> Data is arriving but no decisions yet. Usually means no market has")
             lines.append("     cleared the minimum-edge bar -- which is the gates doing their job.")
@@ -205,9 +237,13 @@ def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
         """
     ).fetchall()
 
-    lines.append(f"-- Trade ledger (paper) -- entry, settlement, P&L @ ${stake_dollars:.0f}/trade --")
+    lines.append("-- Every candidate considered (NOT a strategy -- see above) --")
+    lines.append("   One row per market per polling cycle, gates ignored, negative-edge")
+    lines.append("   candidates included. Buying the same market 900 times pays the fee")
+    lines.append("   900 times on one outcome, so these totals are guaranteed to look")
+    lines.append("   terrible and mean nothing. Use the strategy section above.")
     if not all_rows:
-        lines.append("  (no settled paper trades yet)")
+        lines.append("  (no settled paper records yet)")
         lines.append("")
         return
 
@@ -222,23 +258,104 @@ def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
             wins += 1
 
     n = len(all_rows)
-    lines.append(f"  date        ticker                 side  buy   settled   P&L(1)   P&L(${stake_dollars:.0f})")
+    lines.append(f"  date        ticker                            side  buy   settled   P&L(1)   P&L(${stake_dollars:.0f})")
     for r in all_rows[:ledger_rows]:
         won = _won(r["side"], r["result"])
         settled = "WON $1.00" if won else "LOST $.00"
         pnl1 = _pnl_cents(r["side"], r["price_cents"], r["fee_cents"], 1, r["result"])
         contracts, pnls = _scaled_pnl_cents(r["side"], r["price_cents"], r["result"], stake_cents)
         when = datetime.fromtimestamp(r["filled_ts"] / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
-        tick = (r["ticker"] or "")[:20]
-        lines.append(f"  {when}  {tick:<20}  {r['side']:<4}  {r['price_cents']:>2}c  "
+        tick = (r["ticker"] or "")[:31]
+        lines.append(f"  {when}  {tick:<31}  {r['side']:<4}  {r['price_cents']:>2}c  "
                      f"{settled:<9}  {_fmt_usd(pnl1):>6}  {_fmt_usd(pnls):>8}")
     if n > ledger_rows:
         lines.append(f"  ... and {n - ledger_rows} older trades (full history in the database)")
     lines.append("")
-    lines.append(f"  TOTALS over {n} settled trades:  win rate {100*wins/n:.1f}%")
-    lines.append(f"    at 1 contract/trade : {_fmt_usd(total_1c)}")
-    lines.append(f"    at ${stake_dollars:.0f}/trade      : {_fmt_usd(total_stake)}   "
-                 f"(hypothetical -- assumes full fills at the shown price)")
+    lines.append(f"  Totals over {n} candidate records:  win rate {100*wins/n:.1f}%")
+    lines.append(f"    at 1 contract each : {_fmt_usd(total_1c)}")
+    lines.append(f"    at ${stake_dollars:.0f} each        : {_fmt_usd(total_stake)}")
+    lines.append("    ^ NOT a strategy result. See the strategy section above.")
+    lines.append("")
+
+
+def _strategy_section(dao, lines: list[str], stake_cents: int,
+                      stake_dollars: float, risk_cfg=None) -> None:
+    """What a strategy someone would actually run produced: ONE entry per
+    market, held to settlement.
+
+    Selected on the DECISION-QUALITY gates only -- minimum edge, maximum spread,
+    the price band. The ACCOUNT-STATE gates (funded balance, exposure cap, open
+    positions) are deliberately excluded, because they answer "may I trade right
+    now?" rather than "was this call any good?" -- and on live data they made the
+    question unanswerable: 5,453 candidates cleared min_edge and the price band,
+    and `max_exposure` rejected every one of them for the single reason that the
+    account balance was $0. Scoring on `gate_passed` therefore reported a
+    permanent zero that said nothing whatever about the model.
+
+    This is also not the paper ledger below, which is not a strategy at all:
+    `decide()` has no minimum-edge filter and a paper record is written for every
+    candidate on every polling cycle, so its totals describe buying every market
+    every minute with the limits off, paying the fee hundreds of times on one
+    outcome.
+
+    Still optimistic in one way (it assumes the displayed price was there for the
+    taking); the paper-vs-live divergence section is what eventually measures it.
+    """
+    from .sweep import first_qualifying_per_market, load_candidates, quality_thresholds
+
+    conn = dao.conn
+    th = quality_thresholds(risk_cfg)
+    entries = first_qualifying_per_market(load_candidates(dao), **th)
+    settled_markets = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker = d.ticker"
+    ).fetchone()["c"]
+    also_live = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker = d.ticker WHERE d.gate_passed = 1"
+    ).fetchone()["c"]
+
+    band = th["price_band"]
+    spread_txt = ("any" if th["max_spread"] is None else f"<={th['max_spread']}c")
+    lines.append("-- Strategy: one entry per market, held to settlement (THE number) --")
+    lines.append(f"  rule: edge >= {th['min_edge']:.3f}, spread {spread_txt}, "
+                 f"price outside {band[0]}-{band[1]}c")
+    if not entries:
+        lines.append(f"  No market met that bar, out of {settled_markets} settled.")
+        lines.append("  That is the model declining, not a failure: with no edge above the")
+        lines.append("  minimum, the correct number of trades is zero.")
+        lines.append("")
+        return
+
+    total_1c = total_scaled = wins = 0
+    for c in entries:
+        fee = taker_fee_cents(c.price, 1)
+        total_1c += _pnl_cents(c.side, c.price, fee, 1, c.result)
+        _, scaled = _scaled_pnl_cents(c.side, c.price, c.result, stake_cents)
+        total_scaled += scaled
+        if _won(c.side, c.result):
+            wins += 1
+
+    n = len(entries)
+    avg_price = sum(c.price for c in entries) / n
+    avg_edge = sum(c.edge for c in entries) / n
+    lines.append(f"  markets entered : {n} of {settled_markets} settled "
+                 f"({settled_markets - n} never met the bar)")
+    lines.append(f"  win rate        : {100*wins/n:.1f}%  ({wins}/{n})")
+    lines.append(f"  average entry   : {avg_price:.0f}c, claimed edge {avg_edge:+.3f}/contract")
+    spreads = [c.spread for c in entries if c.spread is not None]
+    if spreads:
+        avg_spread = sum(spreads) / len(spreads)
+        lines.append(f"  average spread  : {avg_spread:.1f}c at entry"
+                     + ("   <-- wider than the edge claimed above"
+                        if avg_spread / 100 > avg_edge else ""))
+    lines.append(f"  {'P&L at 1 each':<16}: {_fmt_usd(total_1c)}")
+    lines.append(f"  {f'P&L at ${stake_dollars:.0f} each':<16}: {_fmt_usd(total_scaled)}")
+    lines.append(f"  of these, {also_live} would ALSO have cleared the account-state gates"
+                 + ("  (0 while the balance is $0 -- fund the account to change this)"
+                    if also_live == 0 else ""))
+    if n < MIN_SAMPLE:
+        lines.append(f"  ({n} markets is far too few to conclude anything either way.)")
     lines.append("")
 
 
@@ -250,6 +367,8 @@ def _calibration_section(conn, lines: list[str]) -> None:
         """
     ).fetchall()
     lines.append("-- Calibration (model P(YES) vs observed YES frequency) --")
+    lines.append("   (n counts decision rows, not games: a market priced every minute")
+    lines.append("    for hours appears many times, so treat n as weight, not sample size)")
     if not rows:
         lines.append("  (no resolved decisions yet)")
         lines.append("")
@@ -294,6 +413,17 @@ def _edge_section(conn, lines: list[str]) -> None:
     edges = sorted(float(r["edge_after_fees"]) for r in rows)
     lines.append(f"  n={len(edges)}  min={edges[0]:+.3f}  "
                  f"median={edges[len(edges)//2]:+.3f}  max={edges[-1]:+.3f}")
+    # Edge is computed at the ask, so it is already net of the spread -- but
+    # seeing the two side by side is what tells you whether the "edge" was a
+    # disagreement with the market or just a wide quote.
+    sp = conn.execute(
+        "SELECT spread_cents FROM decisions WHERE spread_cents IS NOT NULL"
+    ).fetchall()
+    if sp:
+        vals = sorted(r["spread_cents"] for r in sp)
+        wide = sum(1 for v in vals if v > 5)
+        lines.append(f"  spread at those decisions: median {vals[len(vals)//2]}c, "
+                     f"{100*wide/len(vals):.0f}% wider than 5c")
     lines.append("")
 
 
@@ -310,8 +440,8 @@ def _pnl_section(conn, lines: list[str]) -> None:
                     for r in paper)
         fees = sum(r["fee_cents"] for r in paper)
         gross = total + fees
-        lines.append(f"  Paper: {len(paper)} settled fills, net {total/100:+.2f} USD, "
-                     f"fees {fees/100:.2f} USD")
+        lines.append(f"  Paper: {len(paper)} settled candidate records (not trades), "
+                     f"net {total/100:+.2f} USD, fees {fees/100:.2f} USD")
         if gross != 0:
             lines.append(f"  Fee drag (paper): {100*fees/abs(gross):.1f}% of gross P&L")
     else:

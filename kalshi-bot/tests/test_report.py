@@ -48,11 +48,12 @@ def test_report_includes_ledger_and_time_section(dao):
 
     report = generate_report(dao, stake_dollars=10.0)
     text = report.text
-    assert "Trade ledger" in text
+    assert "Every candidate considered" in text
+    assert "NOT a strategy" in text
     assert "WON $1.00" in text
     assert "LOST $.00" in text
     assert "Model accuracy by time before settlement" in text
-    assert "at $10/trade" in text
+    assert "at $10 each" in text          # the stake-scaling column still renders
     assert report.resolved_count == 2
 
 
@@ -60,3 +61,140 @@ def test_report_survives_empty_db(dao):
     report = generate_report(dao)
     assert report.resolved_count == 0
     assert "SAMPLE TOO SMALL" in report.text
+
+
+# --------------------------------------------------------------------------
+# Strategy section: the one number that describes something someone would run.
+#
+# The paper ledger cannot answer "is there edge" -- `decide()` has no minimum-EV
+# filter and a paper record is written every polling cycle regardless of the
+# gates, so the same market appears hundreds of times and pays the fee each
+# time. These tests pin the section that collapses that back to one entry per
+# market, gates enforced.
+# --------------------------------------------------------------------------
+def _seed_decision(dao, ticker, *, side, price, decision_ts, gate_passed,
+                   prob=0.7, edge=0.10, blocked_by=None):
+    did = dao.insert_decision(
+        decision_ts=decision_ts, ticker=ticker, model_name="m", probability=prob,
+        uncertainty=1.0, inputs={}, book_snapshot_id=None, best_yes_bid=None,
+        best_yes_ask=None, intended_side=side, intended_price_cents=price,
+        edge_after_fees=edge, gate_passed=gate_passed, blocked_by=blocked_by)
+    dao.insert_paper_fill(decision_id=did, ticker=ticker, side=side, count=1,
+                          price_cents=price, fee_cents=2, filled_ts=decision_ts)
+
+
+def test_strategy_counts_each_market_once_however_often_it_was_repriced(dao):
+    """900 polls of one game is one bet, not 900 -- and the fee is paid once."""
+    close = 5_000_000_000_000
+    dao.upsert_market(ticker="MKT-A", series="S", city=None, title="t",
+                      close_ts=close, status="settled")
+    for i in range(900):
+        _seed_decision(dao, "MKT-A", side="yes", price=30 + (i % 5),
+                       decision_ts=close - 900_000 + i * 1000, gate_passed=True)
+    dao.upsert_settlement("MKT-A", "yes", close)
+
+    text = generate_report(dao).text
+    assert "markets entered : 1 of 1" in text
+    assert "win rate        : 100.0%  (1/1)" in text
+    # Entry is the FIRST qualifying decision (30c), so P&L is 70c less the fee.
+    assert "P&L at 1 each   : $0.68" in text
+
+
+def test_an_unfunded_account_no_longer_zeroes_out_the_evaluation(dao):
+    """The bug this section was rebuilt for.
+
+    On live data 5,453 candidates cleared the minimum edge and the price band,
+    and `max_exposure` rejected every one of them for the single reason that the
+    account balance was $0. Scoring on `gate_passed` therefore reported a
+    permanent zero, which said nothing whatever about the model. Selection now
+    goes on decision quality; whether the account could act on it is reported
+    separately, not silently folded in.
+    """
+    close = 5_000_000_000_000
+    dao.upsert_market(ticker="MKT-A", series="S", city=None, title="t",
+                      close_ts=close, status="settled")
+    _seed_decision(dao, "MKT-A", side="yes", price=30, decision_ts=close - 1000,
+                   gate_passed=False, blocked_by="max_exposure", edge=0.10)
+    dao.upsert_settlement("MKT-A", "yes", close)
+
+    text = generate_report(dao).text
+    assert "markets entered : 1 of 1" in text          # counted despite the block
+    assert "P&L at 1 each   : $0.68" in text
+    # ...and the account-state reality is stated rather than hidden.
+    assert "of these, 0 would ALSO have cleared the account-state gates" in text
+    assert "fund the account to change this" in text
+
+
+def test_strategy_excludes_a_market_that_missed_the_edge_bar(dao):
+    """Decision quality still filters: a thin-edge call is not a trade."""
+    close = 5_000_000_000_000
+    for ticker, edge in (("GOOD", 0.10), ("THIN", 0.001)):
+        dao.upsert_market(ticker=ticker, series="S", city=None, title="t",
+                          close_ts=close, status="settled")
+        _seed_decision(dao, ticker, side="yes", price=30, decision_ts=close - 1000,
+                       gate_passed=False, blocked_by="min_edge", edge=edge)
+        dao.upsert_settlement(ticker, "yes", close)
+
+    text = generate_report(dao).text
+    assert "markets entered : 1 of 2" in text
+    assert "(1 never met the bar)" in text
+
+
+def test_strategy_uses_the_configured_thresholds(dao):
+    """The bar is the operator's own risk config, not a number baked in here."""
+    close = 5_000_000_000_000
+    dao.upsert_market(ticker="MKT-A", series="S", city=None, title="t",
+                      close_ts=close, status="settled")
+    _seed_decision(dao, "MKT-A", side="yes", price=30, decision_ts=close - 1000,
+                   gate_passed=False, blocked_by="min_edge", edge=0.10)
+    dao.upsert_settlement("MKT-A", "yes", close)
+
+    strict = generate_report(dao, risk_cfg={"min_edge_after_fees": 0.20}).text
+    loose = generate_report(dao, risk_cfg={"min_edge_after_fees": 0.01}).text
+    assert "No market met that bar" in strict
+    assert "markets entered : 1 of 1" in loose
+    assert "edge >= 0.010" in loose            # the rule is printed, not implied
+
+
+def test_strategy_says_so_plainly_when_nothing_meets_the_bar(dao):
+    """Zero qualifying trades is the model declining, and the report must not
+    read like a malfunction."""
+    close = 5_000_000_000_000
+    dao.upsert_market(ticker="MKT-A", series="S", city=None, title="t",
+                      close_ts=close, status="settled")
+    _seed_decision(dao, "MKT-A", side="yes", price=50, decision_ts=close - 1000,
+                   gate_passed=False, blocked_by="min_edge", edge=0.001)
+    dao.upsert_settlement("MKT-A", "yes", close)
+
+    text = generate_report(dao).text
+    assert "No market met that bar, out of 1 settled." in text
+    assert "the correct number of trades is zero" in text
+
+
+def test_strategy_losses_are_counted_at_the_entry_price(dao):
+    close = 5_000_000_000_000
+    dao.upsert_market(ticker="MKT-A", series="S", city=None, title="t",
+                      close_ts=close, status="settled")
+    _seed_decision(dao, "MKT-A", side="yes", price=80, decision_ts=close - 1000,
+                   gate_passed=True)
+    dao.upsert_settlement("MKT-A", "no", close)      # lost
+
+    text = generate_report(dao).text
+    assert "win rate        : 0.0%  (0/1)" in text
+    assert "P&L at 1 each   : -$0.82" in text        # 80c stake + 2c taker fee
+
+
+def test_ledger_shows_enough_of_the_ticker_to_tell_both_sides_apart(dao):
+    """Truncating at 20 chars made KXMLBGAME-...HOULAA-HOU and -LAA identical,
+    so the ledger looked like it had taken both sides of the same bet."""
+    close = 5_000_000_000_000
+    for ticker in ("KXMLBGAME-26JUL272138HOULAA-HOU", "KXMLBGAME-26JUL272138HOULAA-LAA"):
+        dao.upsert_market(ticker=ticker, series="S", city=None, title="t",
+                          close_ts=close, status="settled")
+        _seed_decision(dao, ticker, side="yes", price=50, decision_ts=close - 1000,
+                       gate_passed=True)
+        dao.upsert_settlement(ticker, "yes", close)
+
+    text = generate_report(dao).text
+    assert "KXMLBGAME-26JUL272138HOULAA-HOU" in text
+    assert "KXMLBGAME-26JUL272138HOULAA-LAA" in text

@@ -1,0 +1,98 @@
+# Ready-to-run configuration for the SPORTS bot. Nothing here needs editing.
+#
+# Start it with:
+#     ./run.sh run --config config/sports.yaml
+#
+# There are no passwords or keys in this file. Those live in .env.
+
+market_family: sports
+
+storage:
+  db_path: ./data/sports.db     # its own database, separate from the weather bot
+
+logging:
+  dir: ./logs
+  level: INFO
+  max_bytes: 10485760
+  backup_count: 20
+
+sports:
+  schedule_poll_seconds: 1800   # re-link Kalshi markets to real games
+  rating_poll_seconds: 1800     # recompute each method's predicted margin
+  state_poll_seconds: 60        # live score -- the fast one that matters
+  results_poll_seconds: 21600   # completed games, for the Elo method
+  schedule_horizon_days: 4
+  results_lookback_days: 45
+  max_state_age_seconds: 900    # a started game with an older score = no opinion
+  rating_providers:
+    - elo                       # recent form
+    - log5                      # season win-loss records
+    - pythagorean               # runs scored vs runs allowed
+    # - espn_bookmaker          # sportsbook line. Leave OFF: it changes the
+    #                           # experiment from "can our model beat Kalshi"
+    #                           # to "does Kalshi disagree with DraftKings".
+  pythagorean_exponent: 1.83
+  state_providers:
+    - espn_scoreboard
+  leagues:
+    - name: mlb
+      kalshi_series: KXMLBGAME
+      espn_path: baseball/mlb
+      margin_sigma: 4.4
+      home_advantage_margin: 0.25
+      regulation_periods: 9
+      elo_k: 10.0
+      elo_home_advantage: 25.0
+      elo_min_games: 10
+    # Uncomment when the NFL regular season starts in September. Pre-season
+    # games carry almost no signal, so the model mostly abstains before then.
+    # - name: nfl
+    #   kalshi_series: KXNFLGAME
+    #   espn_path: football/nfl
+    #   margin_sigma: 13.5
+    #   home_advantage_margin: 1.5
+    #   regulation_periods: 4
+    #   elo_k: 30.0
+    #   elo_home_advantage: 55.0
+    #   elo_min_games: 6
+
+collection:
+  book_poll_seconds: 60
+  # Trades are stored for later research; no model reads them. Polling them at
+  # book cadence doubled the Kalshi request rate for no benefit.
+  trade_poll_seconds: 300
+  # Price levels kept per side of the book. The model uses best bid/ask; full
+  # depth cost ~240 MB/day. 0 keeps everything.
+  book_depth_levels: 10
+  book_poll_seconds_near_settlement: 15
+  near_settlement_minutes: 120
+  settlement_poll_seconds: 300
+
+# These BLOCK real orders. Paper records are always written.
+risk:
+  min_edge_after_fees: 0.05
+  # Refuse to cross a book wider than this. Edge is computed at the ask, so a
+  # wide quote manufactures apparent edge: on a market quoted 54/61 you are 3.5c
+  # behind fair before the model has been right about anything.
+  # Measured across 95 live MLB books (2026-07): within 48h of first pitch the
+  # median spread was 1c and nothing exceeded 3c; beyond 48h the median was 5c.
+  # So 3 admits every liquid market and excludes the far-dated ones nobody is
+  # trading yet. Comment out to disable the gate entirely.
+  max_spread_cents: 3
+  price_band_reject_low: 0.40
+  price_band_reject_high: 0.60
+  max_open_markets: 3
+  max_total_exposure_pct: 0.02
+  max_book_age_seconds: 120
+  max_forecast_age_seconds: 21600
+  daily_loss_limit_cents: 500
+  kill_switch_file: ./HALT      # create this file and all real orders stop
+
+model:
+  min_sigma_floor: 1.0          # stops a false consensus looking like certainty
+
+# Real orders. OFF. Do not change this until you have read the "Before you EVER
+# enable live trading" section of README.md.
+live_trading:
+  enabled: false
+  resting_order_timeout_seconds: 300

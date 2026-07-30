@@ -36,6 +36,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ON forecasts(provider, station, target_date)"
         )
 
+    # Same for `decisions`: two databases are already collecting, and they must
+    # pick up the spread columns without losing their history.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(decisions)").fetchall()}
+    if "spread_cents" not in cols:
+        conn.execute("ALTER TABLE decisions ADD COLUMN spread_cents INTEGER")
+    if "depth_at_price" not in cols:
+        conn.execute("ALTER TABLE decisions ADD COLUMN depth_at_price INTEGER")
+
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()

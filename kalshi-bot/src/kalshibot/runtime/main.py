@@ -5,6 +5,10 @@ model -> candidate -> paper record (always) -> live order (only if enabled AND
 every risk gate passes). Designed to survive sleep/wake, network loss, and API
 outages, and to FAIL CLOSED -- any unhandled error in the trading path halts
 live trading for the rest of the process while data collection continues.
+
+The loop itself is family-agnostic: which markets to watch, how to parse them,
+and which collectors feed the model all come from the MarketFamily selected by
+`market_family` in the config (see runtime/families.py).
 """
 from __future__ import annotations
 
@@ -12,22 +16,22 @@ import logging
 import time
 from typing import Optional
 
-from ..clients.forecast_providers import build_forecast_providers, build_observation_providers
 from ..clients.kalshi_client import KalshiClient
-from ..config import CityConfig, Config, Credentials
+from ..config import Config, Credentials
 from ..execution.decider import decide
 from ..execution.live_engine import LiveEngine
 from ..execution.paper_engine import PaperEngine
 from ..logging_setup import log
-from ..models.weather import WeatherNormalModel, parse_temperature_market
-from ..models.base import MarketContext
+from ..models.base import MarketBase, MarketContext
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.gates import GateContext, RiskGateChain
 from ..risk.kill_switch import KillSwitch
 from ..storage.dao import Dao
 from ..storage.db import connect
 from ..util import now_ms
-from .collectors import MarketCollector, WeatherCollector
+from .collectors import MarketCollector
+from .families import build_family
+from .version import git_revision, write_version_stamp
 from .recovery import StaleState
 
 
@@ -37,17 +41,19 @@ class TradingSystem:
         self.log = logger
         self.dao = Dao(connect(config.db_path))
         self.client = KalshiClient(creds)
-        default_fps = ["nws", "open_meteo_best", "open_meteo_hrrr",
-                       "open_meteo_gfs", "open_meteo_ecmwf"]
-        fps = build_forecast_providers(config.weather.get("forecast_providers", default_fps))
-        ops = build_observation_providers(config.weather.get("observation_providers", ["metar"]))
-        logger.info(f"forecast providers: {[p.name for p in fps]}; "
-                    f"observation providers: {[p.name for p in ops]}")
-        self.market_collector = MarketCollector(self.dao, self.client, logger)
-        self.weather_collector = WeatherCollector(self.dao, fps, ops, logger)
+        self.family = build_family(config, self.dao, self.client, logger)
+        logger.info(self.family.describe())
+        # Stamp the commit this process is running. A `git pull` does not change
+        # a running collector, and without this there is no way to tell from the
+        # outside whether the code on disk is the code in memory.
+        self.revision = git_revision()
+        write_version_stamp(config.db_path, config.market_family, self.revision)
+        self.market_collector = MarketCollector(
+            self.dao, self.client, logger,
+            depth_levels=config.collection.get("book_depth_levels"))
         self.paper = PaperEngine(self.dao)
         self.live = LiveEngine(self.dao, self.client)
-        self.model = WeatherNormalModel(sigma_f=float(config.model.get("forecast_sigma_f", 3.0)))
+        self.model = self.family.model
         self.kill = KillSwitch(config.risk.get("kill_switch_file", "./HALT"))
         self.breaker = CircuitBreaker(
             config.raw.get("storage", {}).get("db_path", "./data/kalshibot.db") + ".breaker",
@@ -55,8 +61,7 @@ class TradingSystem:
         )
         self.gates = RiskGateChain(config.risk, self.kill, self.breaker)
         self.stale = StaleState()
-        self.series_by_city = {c.kalshi_series: c for c in config.cities}
-        self.series_list = [c.kalshi_series for c in config.cities]
+        self.series_list = self.family.series_list
         self._live_halted = False  # set on unhandled trading-path error (fail closed)
         self._cycle_counts: dict[str, int] = {"decisions": 0, "passed": 0}
         self._cycle_blocks: dict[str, int] = {}
@@ -65,14 +70,19 @@ class TradingSystem:
     def run(self) -> None:
         col = self.cfg.collection
         book_period = int(col.get("book_poll_seconds", 60))
+        # Trades are recorded for later research; no model reads them. Polling
+        # them at book cadence doubled the Kalshi request rate for nothing.
+        trade_period = int(col.get("trade_poll_seconds", 300))
         settle_period = int(col.get("settlement_poll_seconds", 300))
-        fc_period = int(self.cfg.weather.get("forecast_poll_seconds", 3600))
-        obs_period = int(self.cfg.weather.get("observation_poll_seconds", 900))
-        tick = min(book_period, int(col.get("book_poll_seconds_near_settlement", 15)))
+        data_tasks = self.family.data_tasks()
+        tick = min([book_period, int(col.get("book_poll_seconds_near_settlement", 15))]
+                   + [t.period_seconds for t in data_tasks])
 
-        next_book = next_settle = next_fc = next_obs = 0.0
+        next_book = next_trade = next_settle = 0.0
+        next_data = {t.name: 0.0 for t in data_tasks}
         log(self.log, logging.INFO, "trading system starting",
-            live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family)
+            live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family,
+            code_revision=self.revision)
         # State the account balance once at startup rather than implying it via
         # a per-market gate message every cycle.
         bal = self._read_balance()
@@ -89,15 +99,15 @@ class TradingSystem:
             self.stale.check_wake_gap(tick)
             now = time.time()
             try:
-                if now >= next_fc:
-                    self._safe(self.weather_collector.poll_forecasts, self.cfg.cities)
-                    next_fc = now + fc_period
-                if now >= next_obs:
-                    self._safe(self.weather_collector.poll_observations, self.cfg.cities)
-                    next_obs = now + obs_period
+                for task in data_tasks:
+                    if now >= next_data[task.name]:
+                        self._safe(task.fn, label=task.name)
+                        next_data[task.name] = now + task.period_seconds
+                if now >= next_trade:
+                    self._safe(self.market_collector.poll_trades, self.series_list)
+                    next_trade = now + trade_period
                 if now >= next_book:
                     ok = self._safe(self.market_collector.poll_books, self.series_list)
-                    self._safe(self.market_collector.poll_trades, self.series_list)
                     if ok is not None:
                         self.stale.mark_fresh()   # a clean sweep = fresh state
                         self._decision_cycle()
@@ -112,14 +122,15 @@ class TradingSystem:
             elapsed = time.monotonic() - start
             time.sleep(max(0.0, tick - elapsed))
 
-    def _safe(self, fn, *args):
+    def _safe(self, fn, *args, label: Optional[str] = None):
         """Run a collector, converting failure into a stale-mark instead of a crash."""
+        name = label or getattr(fn, "__name__", "collector")
         try:
             return fn(*args)
         except Exception as e:
-            self.stale.mark_stale(f"{fn.__name__} failed: {e}")
+            self.stale.mark_stale(f"{name} failed: {e}")
             log(self.log, logging.WARNING, "collector failed; state marked stale",
-                fn=fn.__name__, error=str(e))
+                fn=name, error=str(e))
             return None
 
     # ---- decision cycle ----
@@ -128,10 +139,10 @@ class TradingSystem:
             balance = self._read_balance()
             self._cycle_counts = {"decisions": 0, "passed": 0}
             self._cycle_blocks: dict[str, int] = {}
-            for city in self.cfg.cities:
-                markets = self.client.list_markets(series_ticker=city.kalshi_series, status="open")
+            for series in self.series_list:
+                markets = self.client.list_markets(series_ticker=series, status="open")
                 for raw in markets:
-                    self._decide_one(raw, city, balance)
+                    self._decide_one(raw, series, balance)
             self._log_cycle_summary(balance)
         except Exception as e:
             # Fail closed: halt live trading for the rest of the process.
@@ -140,8 +151,8 @@ class TradingSystem:
                 "unhandled error in trading path -- HALTING LIVE, data collection continues",
                 error=str(e))
 
-    def _decide_one(self, raw: dict, city: CityConfig, balance: Optional[int]) -> None:
-        market = parse_temperature_market(raw, city)
+    def _decide_one(self, raw: dict, series: str, balance: Optional[int]) -> None:
+        market: Optional[MarketBase] = self.family.parse(raw, series)
         if market is None:
             return
         now = now_ms()
@@ -156,11 +167,10 @@ class TradingSystem:
         if intent is None:
             return
 
-        fc = view.latest_forecast(market.nws_station, market.target_date) if market.target_date else None
         ctx = GateContext(
             now_ms=now,
             book_captured_ts=book.captured_ts,
-            forecast_fetched_ts=fc.fetched_ts if fc else None,
+            forecast_fetched_ts=self.family.input_fetched_ts(view, market),
             open_live_markets=self._open_live_markets(),
             account_balance_cents=balance,
             open_exposure_cents=self._open_exposure(),
@@ -175,6 +185,7 @@ class TradingSystem:
             best_yes_bid=book.best_yes_bid, best_yes_ask=book.best_yes_ask,
             intended_side=intent.side, intended_price_cents=intent.limit_price_cents,
             edge_after_fees=intent.edge_after_fees,
+            spread_cents=intent.spread_cents, depth_at_price=intent.depth_at_price,
             gate_passed=gate.passed, blocked_by=gate.blocked_by,
         )
         # Paper path: always recorded, regardless of the gates. The gates

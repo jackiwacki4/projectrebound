@@ -14,6 +14,10 @@ from typing import Any
 
 import yaml
 
+# Market families with a model + collectors implemented. One family runs per
+# process; point a second config file at a second database to run both.
+SUPPORTED_FAMILIES = ("weather", "sports")
+
 
 def _load_dotenv(path: str = ".env") -> None:
     """Minimal .env loader (no dependency on python-dotenv).
@@ -68,6 +72,23 @@ class CityConfig:
 
 
 @dataclass(frozen=True)
+class LeagueConfig:
+    """One sports league. The physical constants are REQUIRED, not defaulted:
+    a margin sigma borrowed from another sport silently ruins every probability,
+    so a new league has to state its own (see config.example.yaml for the
+    values used and where they come from)."""
+    name: str                     # league key, e.g. "mlb"
+    kalshi_series: str            # e.g. "KXMLBGAME"
+    espn_path: str                # ESPN sport/league path, e.g. "baseball/mlb"
+    margin_sigma: float           # std-dev of final margin, in runs/points
+    home_advantage_margin: float  # expected margin from playing at home
+    regulation_periods: int       # innings / quarters / periods in regulation
+    elo_k: float = 10.0           # Elo step per game (see config.example.yaml)
+    elo_home_advantage: float = 25.0   # Elo points added to the home side
+    elo_min_games: int = 10       # per-team games before the Elo member opines
+
+
+@dataclass(frozen=True)
 class Config:
     market_family: str
     raw: dict[str, Any] = field(repr=False)
@@ -88,6 +109,14 @@ class Config:
     @property
     def weather(self) -> dict[str, Any]:
         return self.raw.get("weather", {})
+
+    @property
+    def sports(self) -> dict[str, Any]:
+        return self.raw.get("sports", {})
+
+    @property
+    def leagues(self) -> list[LeagueConfig]:
+        return [LeagueConfig(**lg) for lg in self.sports.get("leagues", [])]
 
     @property
     def collection(self) -> dict[str, Any]:
@@ -132,8 +161,13 @@ def load_config(path: str = "config/config.yaml") -> Config:
         )
     raw = yaml.safe_load(p.read_text())
     family = raw.get("market_family", "weather")
-    if family != "weather":
+    if family not in SUPPORTED_FAMILIES:
         raise ValueError(
-            f'Phase 1 only implements market_family "weather", got "{family}".'
+            f'market_family must be one of {sorted(SUPPORTED_FAMILIES)}, got "{family}".'
         )
-    return Config(market_family=family, raw=raw)
+    cfg = Config(market_family=family, raw=raw)
+    if family == "weather" and not cfg.cities:
+        raise ValueError('market_family "weather" needs at least one entry under weather.cities.')
+    if family == "sports" and not cfg.leagues:
+        raise ValueError('market_family "sports" needs at least one entry under sports.leagues.')
+    return cfg

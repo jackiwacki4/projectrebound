@@ -24,6 +24,9 @@ from .kill_switch import KillSwitch
 class GateContext:
     now_ms: int
     book_captured_ts: Optional[int]
+    # When the model's primary input was last known: the newest forecast for the
+    # weather family, the newest rating (or live score, once a game is under way)
+    # for sports. Named for the family it was written for; the gate is generic.
     forecast_fetched_ts: Optional[int]
     open_live_markets: int
     account_balance_cents: Optional[int]   # None => balance read failed
@@ -49,6 +52,7 @@ class RiskGateChain:
             ("kill_switch", self._kill_switch),
             ("circuit_breaker", self._circuit_breaker),
             ("min_edge", self._min_edge),
+            ("spread", self._spread),
             ("price_band", self._price_band),
             ("max_open_markets", self._max_open_markets),
             ("max_exposure", self._max_exposure),
@@ -74,6 +78,33 @@ class RiskGateChain:
         min_edge = float(self.cfg.get("min_edge_after_fees", 0.05))
         if intent.edge_after_fees < min_edge:
             return f"edge {intent.edge_after_fees:.3f} < min {min_edge:.3f}"
+        return None
+
+    def _spread(self, intent, ctx) -> Optional[str]:
+        """Refuse to cross a book wider than the edge being claimed.
+
+        Edge is computed at the ask, so a wide quote manufactures apparent edge:
+        on a market quoted 54/61, buying at 61 is already 3.5c worse than fair
+        before the model has been right about anything.
+
+        Measured across 95 live MLB books (2026-07), spread by time to
+        first pitch: within 48 hours the median was 1c and NOTHING was wider
+        than 3c; beyond 48 hours the median was 5c with 27% wider than 5c. So
+        the wide books are the far-dated ones nobody is trading yet, and this
+        gate's real job is keeping the bot out of those rather than defending
+        against a market-wide cost.
+
+        A market with no quote on one side has no measurable spread; that is
+        treated as too wide rather than as passing, because an untested
+        assumption in the permissive direction is how money gets lost.
+        """
+        cap = self.cfg.get("max_spread_cents")
+        if cap is None:
+            return None                      # not configured -> gate disabled
+        if intent.spread_cents is None:
+            return "spread unknown (one side of the book is empty)"
+        if intent.spread_cents > int(cap):
+            return f"spread {intent.spread_cents}c > max {int(cap)}c"
         return None
 
     def _price_band(self, intent, ctx) -> Optional[str]:
@@ -112,7 +143,7 @@ class RiskGateChain:
         if ctx.book_captured_ts is None or (ctx.now_ms - ctx.book_captured_ts) > max_book:
             return "order book snapshot too old (or missing)"
         if ctx.forecast_fetched_ts is None or (ctx.now_ms - ctx.forecast_fetched_ts) > max_fc:
-            return "forecast data too old (or missing)"
+            return "model input data too old (or missing)"
         return None
 
     def _balance_sanity(self, intent, ctx) -> Optional[str]:

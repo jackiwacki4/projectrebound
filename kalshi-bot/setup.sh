@@ -60,11 +60,16 @@ Setup finished. Two things only you can do:
         open -e .env
      Set   KALSHI_API_KEY_ID=...   to the Key ID Kalshi showed you, then save.
 
-Then start collecting (leave this window open):
-        ./run.sh run
+Then check everything is wired up (says exactly what is wrong, if anything):
+        ./run.sh check --config config/sports.yaml
 
-And watch it anytime from a second window:
-        ./run.sh report      # the validation report + trade ledger
-        ./run.sh health      # a quick pulse check
+And start collecting (leave this window open):
+        ./run.sh run --config config/sports.yaml
+
+Swap in --config config/config.yaml for the weather markets instead.
+
+Watch it anytime from a second window:
+        ./run.sh report --config config/sports.yaml    # validation report
+        ./run.sh health --config config/sports.yaml    # quick pulse check
 --------------------------------------------------------------------
 NEXT

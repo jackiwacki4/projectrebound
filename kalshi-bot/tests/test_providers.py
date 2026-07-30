@@ -11,6 +11,7 @@ import urllib.error
 import pytest
 
 from kalshibot.clients import forecast_providers as fp
+from kalshibot.clients import http_json
 
 
 def test_provider_names_map_to_verified_model_ids():
@@ -37,7 +38,12 @@ def test_build_observation_providers():
 
 
 def test_http_errors_include_the_server_explanation(monkeypatch):
-    """A bare 'HTTP Error 400: Bad Request' hides the reason; the body must survive."""
+    """A bare 'HTTP Error 400: Bad Request' hides the reason; the body must survive.
+
+    The fetch itself lives in clients/http_json.py (shared with the sports feeds),
+    which is what `fp._get_json` resolves to -- patched here at its own module so
+    the dependency is explicit.
+    """
     body = b'{"error":true,"reason":"Cannot initialize MultiDomains from invalid String value bogus."}'
 
     def fake_urlopen(req, timeout=None, context=None):
@@ -45,7 +51,7 @@ def test_http_errors_include_the_server_explanation(monkeypatch):
             "https://api.open-meteo.com/v1/forecast", 400, "Bad Request", {},
             io.BytesIO(body))
 
-    monkeypatch.setattr(fp.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(http_json.urllib.request, "urlopen", fake_urlopen)
 
     with pytest.raises(urllib.error.HTTPError) as exc:
         fp._get_json("https://api.open-meteo.com/v1/forecast?models=bogus")
