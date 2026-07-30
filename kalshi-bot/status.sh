@@ -84,6 +84,22 @@ print(f"    database    : {db}  ({size_mb:.1f} MB, growing ~{per_day:.0f} MB/day
       f" = ~{per_day * 30 / 1024:.1f} GB/month)")
 if per_day * 30 / 1024 > 3:
     print("                  ^ worth watching: this will fill a laptop in months")
+
+# Which code is this collector actually running? `git pull` does not restart it,
+# so the code on disk and the code in memory can differ silently.
+from kalshibot.runtime.version import git_revision, read_version_stamp
+stamp = read_version_stamp(str(db))
+on_disk = git_revision()
+if stamp is None:
+    print("    code        : unknown (started before version tracking -- "
+          "restart to enable)")
+else:
+    running = stamp.get("revision", "unknown")
+    if running == on_disk:
+        print(f"    code        : {running}  (matches the folder)")
+    else:
+        print(f"    code        : running {running}, folder has {on_disk}")
+        print("                  ^ RESTART NEEDED to load the newer code: ./update.sh")
 PY
 }
 

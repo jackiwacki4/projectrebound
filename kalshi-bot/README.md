@@ -207,6 +207,7 @@ Other commands:
 ./run.sh check               # preflight: credentials, Kalshi, markets, data feed
 ./run.sh sweep               # test other thresholds against data already collected
 ./dashboard.sh               # build + open a visual HTML page per family
+./update.sh                  # pull, test, restart -- the safe way to upgrade
 ./run.sh report              # validation report + per-trade ledger
 ./run.sh report --stake 25   # same, with P&L scaled to $25 per trade
 ./run.sh health              # quick pulse check
@@ -276,6 +277,28 @@ series, and — because status green and status red measure CVD ΔE 4.1, i.e.
 indistinguishable to a red-green colourblind reader — **every signed number
 carries an arrow glyph and a word, never colour alone**. The entry table is the
 non-visual view of the same figures.
+
+## Keeping a running bot on the current code
+
+**`git pull` does not restart anything.** Python read the source once at startup
+and keeps using it, so a pull leaves the old model running with no outward sign:
+the same log lines, the same data arriving, silently stale predictions.
+
+Two things close that gap:
+
+- Every collector stamps the commit it started from into `<db_path>.version`, and
+  `./status.sh` compares it to the code in the folder:
+  ```
+      code        : running 0ldc0de, folder has c7a72dd
+                    ^ RESTART NEEDED to load the newer code: ./update.sh
+  ```
+  A `+local` suffix means the checkout has uncommitted edits, so the process is
+  running no published commit at all.
+- `./update.sh` does the whole upgrade in order: refuse if there are local edits
+  worth protecting, pull, **run the test suite**, and only then restart the
+  collectors — via `install-autostart.sh` if the background agents are installed.
+  If the tests fail it stops without restarting: old-but-working beats
+  new-but-broken on something left unattended for days.
 
 ## The intended order of operations
 

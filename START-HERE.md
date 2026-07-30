@@ -178,6 +178,25 @@ safety gate.
 It is just a file on your Mac — nothing is published, no password, no server. To
 refresh it, run the same command again. For one bot only: `./dashboard.sh sports`.
 
+## Step 10 — Getting improvements later
+
+When there is newer code, one command does everything safely:
+
+```sh
+cd ~/projectrebound/kalshi-bot && ./update.sh
+```
+
+It downloads the update, checks the tests still pass, and **restarts the bots so
+they actually use it**. That last part matters: downloading new code does not
+change a bot that is already running — it keeps using the version it started
+with until it is restarted.
+
+If the tests fail, it stops and leaves your bots running the old version rather
+than restarting them onto something broken. Nothing is lost either way.
+
+To check which version a bot is running at any time, `./status.sh` now shows a
+`code` line. If it says **RESTART NEEDED**, run the command above.
+
 ---
 
 ## How to stop it

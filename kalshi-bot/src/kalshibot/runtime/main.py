@@ -31,6 +31,7 @@ from ..storage.db import connect
 from ..util import now_ms
 from .collectors import MarketCollector
 from .families import build_family
+from .version import git_revision, write_version_stamp
 from .recovery import StaleState
 
 
@@ -42,6 +43,11 @@ class TradingSystem:
         self.client = KalshiClient(creds)
         self.family = build_family(config, self.dao, self.client, logger)
         logger.info(self.family.describe())
+        # Stamp the commit this process is running. A `git pull` does not change
+        # a running collector, and without this there is no way to tell from the
+        # outside whether the code on disk is the code in memory.
+        self.revision = git_revision()
+        write_version_stamp(config.db_path, config.market_family, self.revision)
         self.market_collector = MarketCollector(
             self.dao, self.client, logger,
             depth_levels=config.collection.get("book_depth_levels"))
@@ -75,7 +81,8 @@ class TradingSystem:
         next_book = next_trade = next_settle = 0.0
         next_data = {t.name: 0.0 for t in data_tasks}
         log(self.log, logging.INFO, "trading system starting",
-            live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family)
+            live_enabled=self.cfg.live_trading_enabled, family=self.cfg.market_family,
+            code_revision=self.revision)
         # State the account balance once at startup rather than implying it via
         # a per-market gate message every cycle.
         bal = self._read_balance()
