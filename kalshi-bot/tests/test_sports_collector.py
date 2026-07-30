@@ -9,7 +9,7 @@ No network: a stub Kalshi client and a stub ESPN client stand in, both returning
 the shapes the real ones were verified to produce.
 """
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from kalshibot.clients.espn_client import EspnGame, TeamStanding
 from kalshibot.clients.sports_providers import Log5Provider
@@ -167,9 +167,14 @@ def test_poll_schedule_is_idempotent(dao):
 # poll_results / poll_ratings / poll_states
 # --------------------------------------------------------------------------
 def test_poll_results_stores_only_finished_games_and_dedupes(dao):
-    finished = _game("100", "2026-07-25T17:10Z", "KC", "DET", state="post",
+    # Dated relative to today, not pinned: poll_results only walks back
+    # results_lookback_days from the real clock, so a hard-coded date silently
+    # falls out of the window as time passes and the test fails days later for
+    # no reason connected to the code.
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    finished = _game("100", f"{yesterday}T17:10Z", "KC", "DET", state="post",
                      completed=True, period=9, away_score=3, home_score=2)
-    scheduled = _game("101", "2026-07-25T20:05Z", "SD", "MIA")
+    scheduled = _game("101", f"{yesterday}T20:05Z", "SD", "MIA")
     collector = _collector(dao, StubKalshi([]), StubEspn([finished, scheduled]),
                            results_lookback_days=3)
     collector.poll_results([MLB])

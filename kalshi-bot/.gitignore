@@ -2,6 +2,7 @@
 secrets/
 data/
 logs/
+reports/
 *.db
 *.db-wal
 *.db-shm

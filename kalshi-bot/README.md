@@ -206,6 +206,7 @@ Other commands:
 ```sh
 ./run.sh check               # preflight: credentials, Kalshi, markets, data feed
 ./run.sh sweep               # test other thresholds against data already collected
+./dashboard.sh               # build + open a visual HTML page per family
 ./run.sh report              # validation report + per-trade ledger
 ./run.sh report --stake 25   # same, with P&L scaled to $25 per trade
 ./run.sh health              # quick pulse check
@@ -257,6 +258,24 @@ It sweeps the *gates*, not the model — and it splits the history in half by da
 and shows both, because the best cell of a table fitted on the same data is not
 a discovery. A setting that only works in one half is noise, and the output says
 so.
+
+## Seeing it: `./dashboard.sh`
+
+Builds a self-contained HTML page per family into `reports/` and opens it. Hero
+numbers, a calibration curve against the "perfect" diagonal, Brier by
+time-before-settlement, cumulative P&L of trades that cleared the gates, why
+candidates were blocked, and a table of every entry.
+
+It is a **static file**, not a server — no port, no login, nothing loaded over
+the network, so it works offline and adds no attack surface to a machine holding
+trading credentials. That is why the CLI-only rule in this README survives it.
+
+Charts follow the project's data-viz rules: one series each (so no legend is
+needed), a recessive grid, a dashed neutral reference diagonal that is not a
+series, and — because status green and status red measure CVD ΔE 4.1, i.e.
+indistinguishable to a red-green colourblind reader — **every signed number
+carries an arrow glyph and a word, never colour alone**. The entry table is the
+non-visual view of the same figures.
 
 ## The intended order of operations
 

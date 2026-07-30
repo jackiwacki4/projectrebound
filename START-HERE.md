@@ -164,6 +164,20 @@ One tradeoff worth knowing: the background job wraps the bot in `caffeinate -s`,
 which keeps the Mac awake **while it is plugged in** so sleep doesn't interrupt
 collection. On battery it will not fight sleep, to avoid draining it.
 
+## Step 9 — See it as a picture
+
+```sh
+cd ~/projectrebound/kalshi-bot && ./dashboard.sh
+```
+
+That builds a web page for each bot and opens them in your browser. Charts, not
+walls of text: whether the model's predictions match reality, whether it gets
+sharper as games finish, and the running total of any trades that cleared every
+safety gate.
+
+It is just a file on your Mac — nothing is published, no password, no server. To
+refresh it, run the same command again. For one bot only: `./dashboard.sh sports`.
+
 ---
 
 ## How to stop it
