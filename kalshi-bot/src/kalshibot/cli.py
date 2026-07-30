@@ -180,7 +180,8 @@ def cmd_check(args) -> int:
 
 def cmd_report(args) -> int:
     cfg = load_config(args.config)
-    report = generate_report(_dao(cfg), stake_dollars=args.stake)
+    report = generate_report(_dao(cfg), stake_dollars=args.stake,
+                             risk_cfg=cfg.risk)
     print(report.text)
     return 0
 
@@ -196,7 +197,7 @@ def cmd_dashboard(args) -> int:
     from .reporting.dashboard import generate_dashboard
     cfg = load_config(args.config)
     html = generate_dashboard(_dao(cfg), cfg.market_family, cfg.db_path,
-                              stake_dollars=args.stake)
+                              stake_dollars=args.stake, risk_cfg=cfg.risk)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html)

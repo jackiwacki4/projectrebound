@@ -42,6 +42,38 @@ class Candidate:
     edge: float
     spread: Optional[int]
     result: str
+    prob: float = 0.0
+
+
+# The two kinds of gate, kept apart on purpose.
+#
+# DECISION-QUALITY gates answer "is this trade worth taking?" -- minimum edge,
+# maximum spread, the price band. They are a property of the opportunity.
+#
+# ACCOUNT-STATE gates answer "may I trade at all right now?" -- funded balance,
+# exposure caps, open-position count, the kill switch. They are a property of the
+# account, and with an unfunded account they block EVERYTHING: on live data 5,453
+# candidates cleared both min_edge and the price band, and `max_exposure` then
+# rejected all 5,453 because the balance was $0.
+#
+# So the research question -- would these calls have made money? -- must be
+# answered with the decision-quality gates only. Scoring on the account-state
+# gates as well reports a permanent zero and says nothing about the model.
+DECISION_QUALITY_DEFAULTS = {"min_edge": 0.05, "max_spread": None,
+                             "price_band": (40, 60)}
+
+
+def quality_thresholds(risk_cfg: Optional[dict]) -> dict:
+    """Decision-quality thresholds from a risk config, falling back to defaults."""
+    if not risk_cfg:
+        return dict(DECISION_QUALITY_DEFAULTS)
+    cap = risk_cfg.get("max_spread_cents")
+    return {
+        "min_edge": float(risk_cfg.get("min_edge_after_fees", 0.05)),
+        "max_spread": None if cap is None else int(cap),
+        "price_band": (int(float(risk_cfg.get("price_band_reject_low", 0.40)) * 100),
+                       int(float(risk_cfg.get("price_band_reject_high", 0.60)) * 100)),
+    }
 
 
 @dataclass(frozen=True)
@@ -71,7 +103,7 @@ def load_candidates(dao: Dao) -> list[Candidate]:
         """
         SELECT d.ticker, d.decision_ts AS ts, d.intended_side AS side,
                d.intended_price_cents AS price, d.edge_after_fees AS edge,
-               d.spread_cents AS spread, s.result AS result
+               d.spread_cents AS spread, d.probability AS prob, s.result AS result
         FROM decisions d
         JOIN settlements s ON s.ticker = d.ticker
         WHERE d.intended_side IS NOT NULL AND d.intended_price_cents IS NOT NULL
@@ -80,17 +112,24 @@ def load_candidates(dao: Dao) -> list[Candidate]:
         """
     ).fetchall()
     return [Candidate(ticker=r["ticker"], ts=r["ts"], side=r["side"], price=r["price"],
-                      edge=float(r["edge"]), spread=r["spread"], result=r["result"])
+                      edge=float(r["edge"]), spread=r["spread"], result=r["result"],
+                      prob=float(r["prob"] or 0.0))
             for r in rows]
 
 
-def simulate(candidates: list[Candidate], *, min_edge: float, max_spread: Optional[int],
-             stake_cents: int, price_band: tuple[int, int] = (40, 60)) -> Outcome:
-    """Take the FIRST qualifying candidate per market, hold to settlement.
+def first_qualifying_per_market(candidates: list[Candidate], *, min_edge: float,
+                                max_spread: Optional[int],
+                                price_band: tuple[int, int] = (40, 60)
+                                ) -> list[Candidate]:
+    """The FIRST candidate per market that clears the decision-quality gates.
 
     One entry per market, because the same market re-priced every minute is one
     opportunity, not hundreds -- counting each poll would multiply both the wins
-    and the fees by the length of time the market happened to stay open.
+    and the fees by the length of time the market happened to stay open. First,
+    not best: picking the best price in hindsight is lookahead.
+
+    The single definition of "a trade this strategy would take", shared by the
+    sweep, the report and the dashboard so the three cannot drift apart.
     """
     entered: dict[str, Candidate] = {}
     for c in candidates:
@@ -107,6 +146,14 @@ def simulate(candidates: list[Candidate], *, min_edge: float, max_spread: Option
             if c.spread is None or c.spread > max_spread:
                 continue
         entered[c.ticker] = c
+    return list(entered.values())
+
+
+def simulate(candidates: list[Candidate], *, min_edge: float, max_spread: Optional[int],
+             stake_cents: int, price_band: tuple[int, int] = (40, 60)) -> Outcome:
+    """Score the qualifying entries, held to settlement."""
+    entered = {c.ticker: c for c in first_qualifying_per_market(
+        candidates, min_edge=min_edge, max_spread=max_spread, price_band=price_band)}
 
     wins = pnl_1c = pnl_stake = 0
     for c in entered.values():

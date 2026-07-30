@@ -63,7 +63,8 @@ class Report:
     market_count: int = 0    # DISTINCT settled markets behind those rows
 
 
-def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25) -> Report:
+def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25,
+                    risk_cfg: Optional[dict] = None) -> Report:
     conn = dao.conn
     lines: list[str] = []
     stake_cents = int(round(stake_dollars * 100))
@@ -97,7 +98,7 @@ def generate_report(dao: Dao, stake_dollars: float = 10.0, ledger_rows: int = 25
     lines.append("")
 
     _activity_section(conn, lines)
-    _strategy_section(conn, lines, stake_cents, stake_dollars)
+    _strategy_section(dao, lines, stake_cents, stake_dollars, risk_cfg)
     _calibration_section(conn, lines)
     _accuracy_by_time_to_settlement(conn, lines)
     _edge_section(conn, lines)
@@ -277,66 +278,72 @@ def _trade_ledger_section(conn, lines: list[str], stake_cents: int,
     lines.append("")
 
 
-def _strategy_section(conn, lines: list[str], stake_cents: int,
-                      stake_dollars: float) -> None:
+def _strategy_section(dao, lines: list[str], stake_cents: int,
+                      stake_dollars: float, risk_cfg=None) -> None:
     """What a strategy someone would actually run produced: ONE entry per
-    market, taken only when every risk gate passed, held to settlement.
+    market, held to settlement.
 
-    This exists because the paper ledger below is not a strategy and cannot be
-    read as one. `decide()` has no minimum-edge filter -- it returns the better
-    of the two sides even when the expected value is negative -- and the paper
-    record is written for every candidate on every polling cycle regardless of
-    the gates, because it is research data about the model, not a trade log. So
-    the paper totals describe buying every market every minute with the risk
-    limits switched off, which nobody would do and which loses money by
-    construction: the fee is paid hundreds of times on one outcome.
+    Selected on the DECISION-QUALITY gates only -- minimum edge, maximum spread,
+    the price band. The ACCOUNT-STATE gates (funded balance, exposure cap, open
+    positions) are deliberately excluded, because they answer "may I trade right
+    now?" rather than "was this call any good?" -- and on live data they made the
+    question unanswerable: 5,453 candidates cleared min_edge and the price band,
+    and `max_exposure` rejected every one of them for the single reason that the
+    account balance was $0. Scoring on `gate_passed` therefore reported a
+    permanent zero that said nothing whatever about the model.
 
-    The number below is the honest one. It is still optimistic (it assumes the
-    displayed price was there for the taking), and the paper-vs-live divergence
-    section is what eventually measures that.
+    This is also not the paper ledger below, which is not a strategy at all:
+    `decide()` has no minimum-edge filter and a paper record is written for every
+    candidate on every polling cycle, so its totals describe buying every market
+    every minute with the limits off, paying the fee hundreds of times on one
+    outcome.
+
+    Still optimistic in one way (it assumes the displayed price was there for the
+    taking); the paper-vs-live divergence section is what eventually measures it.
     """
-    rows = conn.execute(
-        """
-        SELECT d.ticker, d.intended_side AS side, d.intended_price_cents AS price,
-               MIN(d.decision_ts) AS entry_ts, d.edge_after_fees AS edge,
-               d.spread_cents AS spread, s.result AS result
-        FROM decisions d
-        JOIN settlements s ON s.ticker = d.ticker
-        WHERE d.gate_passed = 1 AND d.intended_side IS NOT NULL
-          AND d.intended_price_cents IS NOT NULL
-        GROUP BY d.ticker
-        """
-    ).fetchall()
+    from .sweep import first_qualifying_per_market, load_candidates, quality_thresholds
+
+    conn = dao.conn
+    th = quality_thresholds(risk_cfg)
+    entries = first_qualifying_per_market(load_candidates(dao), **th)
     settled_markets = conn.execute(
         "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
         "JOIN settlements s ON s.ticker = d.ticker"
     ).fetchone()["c"]
+    also_live = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) AS c FROM decisions d "
+        "JOIN settlements s ON s.ticker = d.ticker WHERE d.gate_passed = 1"
+    ).fetchone()["c"]
 
-    lines.append("-- Strategy: one entry per market, gates enforced (THE number) --")
-    if not rows:
-        lines.append(f"  No market cleared every risk gate, out of {settled_markets} settled.")
-        lines.append("  That is the gates working, not a failure: with no edge above the")
+    band = th["price_band"]
+    spread_txt = ("any" if th["max_spread"] is None else f"<={th['max_spread']}c")
+    lines.append("-- Strategy: one entry per market, held to settlement (THE number) --")
+    lines.append(f"  rule: edge >= {th['min_edge']:.3f}, spread {spread_txt}, "
+                 f"price outside {band[0]}-{band[1]}c")
+    if not entries:
+        lines.append(f"  No market met that bar, out of {settled_markets} settled.")
+        lines.append("  That is the model declining, not a failure: with no edge above the")
         lines.append("  minimum, the correct number of trades is zero.")
         lines.append("")
         return
 
     total_1c = total_scaled = wins = 0
-    for r in rows:
-        fee = taker_fee_cents(r["price"], 1)
-        total_1c += _pnl_cents(r["side"], r["price"], fee, 1, r["result"])
-        _, scaled = _scaled_pnl_cents(r["side"], r["price"], r["result"], stake_cents)
+    for c in entries:
+        fee = taker_fee_cents(c.price, 1)
+        total_1c += _pnl_cents(c.side, c.price, fee, 1, c.result)
+        _, scaled = _scaled_pnl_cents(c.side, c.price, c.result, stake_cents)
         total_scaled += scaled
-        if _won(r["side"], r["result"]):
+        if _won(c.side, c.result):
             wins += 1
 
-    n = len(rows)
-    avg_price = sum(r["price"] for r in rows) / n
-    avg_edge = sum(float(r["edge"] or 0) for r in rows) / n
+    n = len(entries)
+    avg_price = sum(c.price for c in entries) / n
+    avg_edge = sum(c.edge for c in entries) / n
     lines.append(f"  markets entered : {n} of {settled_markets} settled "
-                 f"({settled_markets - n} never cleared the gates)")
+                 f"({settled_markets - n} never met the bar)")
     lines.append(f"  win rate        : {100*wins/n:.1f}%  ({wins}/{n})")
     lines.append(f"  average entry   : {avg_price:.0f}c, claimed edge {avg_edge:+.3f}/contract")
-    spreads = [r["spread"] for r in rows if r["spread"] is not None]
+    spreads = [c.spread for c in entries if c.spread is not None]
     if spreads:
         avg_spread = sum(spreads) / len(spreads)
         lines.append(f"  average spread  : {avg_spread:.1f}c at entry"
@@ -344,6 +351,9 @@ def _strategy_section(conn, lines: list[str], stake_cents: int,
                         if avg_spread / 100 > avg_edge else ""))
     lines.append(f"  {'P&L at 1 each':<16}: {_fmt_usd(total_1c)}")
     lines.append(f"  {f'P&L at ${stake_dollars:.0f} each':<16}: {_fmt_usd(total_scaled)}")
+    lines.append(f"  of these, {also_live} would ALSO have cleared the account-state gates"
+                 + ("  (0 while the balance is $0 -- fund the account to change this)"
+                    if also_live == 0 else ""))
     if n < MIN_SAMPLE:
         lines.append(f"  ({n} markets is far too few to conclude anything either way.)")
     lines.append("")

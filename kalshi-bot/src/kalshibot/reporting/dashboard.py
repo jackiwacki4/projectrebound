@@ -153,21 +153,17 @@ def _collection_status(conn, db_path: str) -> dict:
             "minutes_ago": (now - row["hi"]) / 60_000, "size_mb": size}
 
 
-def _entries(conn) -> list[sqlite3.Row]:
-    """One entry per settled market: the first candidate that cleared every gate."""
-    return conn.execute(
-        """
-        SELECT d.ticker, MIN(d.decision_ts) AS ts, d.intended_side AS side,
-               d.intended_price_cents AS price, d.edge_after_fees AS edge,
-               d.spread_cents AS spread, d.probability AS prob, s.result AS result
-        FROM decisions d
-        JOIN settlements s ON s.ticker = d.ticker
-        WHERE d.gate_passed = 1 AND d.intended_side IS NOT NULL
-          AND d.intended_price_cents IS NOT NULL
-        GROUP BY d.ticker
-        ORDER BY ts
-        """
-    ).fetchall()
+def _entries(dao, risk_cfg=None) -> list:
+    """One entry per settled market, chosen on the DECISION-QUALITY gates.
+
+    Not on `gate_passed`: the account-state gates (funded balance, exposure cap)
+    reject everything while the account holds $0, which on live data rejected all
+    5,453 otherwise-qualifying candidates and made this page permanently empty.
+    Shares its selection rule with the sweep and the text report."""
+    from .sweep import first_qualifying_per_market, load_candidates, quality_thresholds
+    entries = first_qualifying_per_market(load_candidates(dao),
+                                          **quality_thresholds(risk_cfg))
+    return sorted(entries, key=lambda c: c.ts)
 
 
 def _calibration(conn) -> list[dict]:
@@ -291,14 +287,14 @@ def _brier_svg(rows: list[dict]) -> str:
 
 def _pnl_svg(entries: list[sqlite3.Row]) -> str:
     if not entries:
-        return ('<p class="note">No market has cleared every risk gate yet, so there is '
+        return ('<p class="note">No market met the minimum-edge bar yet, so there is '
                 'nothing to plot. With no edge above the minimum, zero trades is the '
                 'correct answer -- not a malfunction.</p>')
     running, cum = 0, []
     for e in entries:
-        fee = taker_fee_cents(e["price"], 1)
-        running += ((100 - e["price"]) if _won(e["side"], e["result"]) else -e["price"]) - fee
-        cum.append((e["ts"], running, e))
+        fee = taker_fee_cents(e.price, 1)
+        running += ((100 - e.price) if _won(e.side, e.result) else -e.price) - fee
+        cum.append((e.ts, running, e))
     W, H, P = 520, 260, 52
     lo = min(0, min(v for _, v, _ in cum))
     hi = max(0, max(v for _, v, _ in cum))
@@ -321,8 +317,8 @@ def _pnl_svg(entries: list[sqlite3.Row]) -> str:
     parts.append(f'<path class="line" d="{d}"/>')
     for i, (ts, v, e) in enumerate(cum):
         when = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%b %d %H:%M")
-        tip = (f"{e['ticker']} - {e['side'].upper()} at {e['price']}c, "
-               f"{'won' if _won(e['side'], e['result']) else 'lost'} - "
+        tip = (f"{e.ticker} - {e.side.upper()} at {e.price}c, "
+               f"{'won' if _won(e.side, e.result) else 'lost'} - "
                f"running total {_usd(int(v))} ({when} UTC)")
         parts.append(f'<circle class="dot" cx="{px(i):.1f}" cy="{py(v):.1f}" r="4.5" '
                      f'data-tip="{_esc(tip)}"/>')
@@ -337,10 +333,11 @@ def _pnl_svg(entries: list[sqlite3.Row]) -> str:
 # --------------------------------------------------------------------------
 # page
 # --------------------------------------------------------------------------
-def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10.0) -> str:
+def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10.0,
+                       risk_cfg=None) -> str:
     conn = dao.conn
     status = _collection_status(conn, db_path)
-    entries = _entries(conn)
+    entries = _entries(dao, risk_cfg)
     calib = _calibration(conn)
     brier = _brier_by_window(conn)
     blocks = _blocks(conn)
@@ -354,10 +351,10 @@ def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10
 
     pnl_1c = wins = 0
     for e in entries:
-        fee = taker_fee_cents(e["price"], 1)
-        won = _won(e["side"], e["result"])
+        fee = taker_fee_cents(e.price, 1)
+        won = _won(e.side, e.result)
         wins += 1 if won else 0
-        pnl_1c += ((100 - e["price"]) if won else -e["price"]) - fee
+        pnl_1c += ((100 - e.price) if won else -e.price) - fee
 
     stale = status["minutes_ago"] is not None and status["minutes_ago"] > 10
     o = []
@@ -390,14 +387,14 @@ def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10
     if entries:
         o.append(f'<div class="tile"><div class="label">Trades taken</div>'
                  f'<div class="value">{len(entries)}</div>'
-                 f'<div class="foot">cleared every risk gate</div></div>')
+                 f'<div class="foot">met the edge bar</div></div>')
         o.append(f'<div class="tile"><div class="label">P&amp;L, 1 contract each</div>'
                  f'<div class="value">{_signed(pnl_1c)}</div>'
                  f'<div class="foot">win rate {100*wins/len(entries):.0f}%</div></div>')
     else:
         o.append('<div class="tile"><div class="label">Trades taken</div>'
                  '<div class="value">0</div>'
-                 '<div class="foot">nothing cleared the gates</div></div>')
+                 '<div class="foot">nothing met the edge bar</div></div>')
         o.append('<div class="tile"><div class="label">P&amp;L</div>'
                  '<div class="value">&mdash;</div>'
                  '<div class="foot">no trades, so no result</div></div>')
@@ -415,15 +412,26 @@ def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10
              'observation feed adding real information.</p>'
              + _brier_svg(brier) + '</div>')
 
-    o.append('<div class="card"><h2>Cumulative P&amp;L of trades that cleared the gates</h2>'
-             '<p class="note">One entry per market, held to settlement, 1 contract each. '
-             'This is the only P&amp;L on this page that describes a strategy anyone '
-             'would actually run.</p>'
+    also_live = conn.execute(
+        "SELECT COUNT(DISTINCT d.ticker) c FROM decisions d "
+        "JOIN settlements s ON s.ticker = d.ticker WHERE d.gate_passed = 1").fetchone()["c"]
+    account_note = ""
+    if entries:
+        account_note = (
+            f' Of these {len(entries)}, <strong>{also_live}</strong> would also have '
+            f'cleared the account-state gates (funded balance, exposure cap).'
+            + (' That is zero because the account holds $0 &mdash; those gates govern '
+               'whether you <em>may</em> trade, not whether the call was good.'
+               if also_live == 0 else ''))
+    o.append('<div class="card"><h2>Cumulative P&amp;L of trades the strategy would have taken</h2>'
+             '<p class="note">One entry per market that met the edge bar, held to '
+             'settlement, 1 contract each. This is the only P&amp;L on this page that '
+             'describes a strategy anyone would actually run.' + account_note + '</p>'
              + _pnl_svg(entries) + '</div>')
 
     if blocks:
         total = sum(r["c"] for r in blocks)
-        o.append('<div class="card"><h2>Why candidates were not traded</h2>'
+        o.append('<div class="card"><h2>Why candidates were rejected</h2>'
                  '<p class="note">Gates firing constantly is them working. '
                  '<code>min_edge</code> dominating means the model rarely disagrees with '
                  'the market by enough to be worth the fee.</p><div class="scroll"><table>'
@@ -442,14 +450,14 @@ def generate_dashboard(dao, family: str, db_path: str, stake_dollars: float = 10
                  '<th class="num">paid</th><th class="num">spread</th>'
                  '<th>settled</th><th class="num">P&amp;L</th></tr>')
         for e in reversed(entries):
-            fee = taker_fee_cents(e["price"], 1)
-            won = _won(e["side"], e["result"])
-            pnl = ((100 - e["price"]) if won else -e["price"]) - fee
-            when = datetime.fromtimestamp(e["ts"] / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
-            sp = f'{e["spread"]}c' if e["spread"] is not None else "&mdash;"
-            o.append(f'<tr><td>{when}</td><td>{_esc(e["ticker"])}</td>'
-                     f'<td>{_esc(e["side"].upper())}</td>'
-                     f'<td class="num">{e["price"]}c</td><td class="num">{sp}</td>'
+            fee = taker_fee_cents(e.price, 1)
+            won = _won(e.side, e.result)
+            pnl = ((100 - e.price) if won else -e.price) - fee
+            when = datetime.fromtimestamp(e.ts / 1000, tz=timezone.utc).strftime("%m-%d %H:%M")
+            sp = f'{e.spread}c' if e.spread is not None else "&mdash;"
+            o.append(f'<tr><td>{when}</td><td>{_esc(e.ticker)}</td>'
+                     f'<td>{_esc(e.side.upper())}</td>'
+                     f'<td class="num">{e.price}c</td><td class="num">{sp}</td>'
                      f'<td>{"won" if won else "lost"}</td>'
                      f'<td class="num">{_signed(pnl)}</td></tr>')
         o.append('</table></div></div>')

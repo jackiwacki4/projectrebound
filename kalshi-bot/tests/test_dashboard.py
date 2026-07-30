@@ -66,14 +66,27 @@ def test_profit_and_loss_never_relies_on_colour(dao):
 
 
 def test_says_nothing_traded_rather_than_showing_an_empty_chart(dao):
-    """The sports family's real result: no market cleared the gates. That must
-    read as the gates working, not as a broken page."""
+    """Zero qualifying trades must read as the model declining, not a broken
+    page. Price 50c sits inside the 40-60 reject band, so nothing qualifies."""
     _seed_market(dao, "MKT-A", price=50, result="yes", gate_passed=False,
                  ts=1_000_000, close=2_000_000)
     h = _html(dao)
-    assert "No market has cleared every risk gate yet" in h
+    assert "No market met the minimum-edge bar yet" in h
     assert "zero trades is the" in h
     assert "no trades, so no result" in h
+
+
+def test_a_trade_the_funding_gate_blocked_still_appears(dao):
+    """The page must not go permanently empty just because the account holds $0
+    -- on live data that rejected all 5,453 otherwise-qualifying candidates."""
+    _seed_market(dao, "MKT-A", price=30, result="yes", gate_passed=False,
+                 ts=1_000_000, close=2_000_000)
+    h = _html(dao)
+    assert "<td>MKT-A</td>" in h
+    assert "met the edge bar" in h
+    # And the page says plainly that the account could not have acted on it.
+    assert "would also have cleared the account-state gates" in h
+    assert "the account holds $0" in h
 
 
 def test_entries_are_one_per_market_not_one_per_poll(dao):
